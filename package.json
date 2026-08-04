@@ -1,0 +1,76 @@
+{
+  "name": "artfrance-drop-domains",
+  "version": "1.0.0",
+  "description": "ART France — поиск drop-доменов через Semrush Outbound Domains",
+  "main": "electron/main.cjs",
+  "author": "ART France",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -k \"vite\" \"wait-on http://127.0.0.1:5174 && cross-env ELECTRON_DEV=1 electron .\"",
+    "build": "node scripts/make-icon.cjs && vite build",
+    "browsers": "npx playwright install chromium && node scripts/prepare-browsers.cjs",
+    "start": "npm run build && electron .",
+    "pack": "npm run browsers && npm run build && electron-builder --win portable",
+    "icon": "node scripts/make-icon.cjs",
+    "postinstall": "playwright install chromium"
+  },
+  "build": {
+    "appId": "fr.artfrance.dropdomains",
+    "productName": "ART France Drop Domains",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "build/icon.png",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "vendor/ms-playwright",
+        "to": "ms-playwright"
+      }
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "**/node_modules/playwright/**",
+      "**/node_modules/playwright-core/**"
+    ],
+    "icon": "build/icon.png",
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "artifactName": "ART-France-Drop-Domains.exe",
+      "signAndEditExecutable": false
+    },
+    "portable": {
+      "artifactName": "ART-France-Drop-Domains.exe"
+    }
+  },
+  "dependencies": {
+    "@fontsource/montserrat": "^5.2.6",
+    "playwright": "^1.54.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.7.0",
+    "concurrently": "^9.2.0",
+    "cross-env": "^7.0.3",
+    "electron": "^37.2.3",
+    "electron-builder": "^26.0.12",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "typescript": "^5.8.3",
+    "vite": "^7.0.5",
+    "wait-on": "^8.0.4"
+  }
+}

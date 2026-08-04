@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" fill="none">
+  <rect width="256" height="256" rx="56" fill="#010039"/>
+  <rect x="28" y="28" width="200" height="200" rx="44" fill="#0A0B4D"/>
+  <!-- browser / archive frame -->
+  <rect x="52" y="64" width="152" height="118" rx="16" stroke="#00FFEF" stroke-width="10" fill="none"/>
+  <path d="M52 92h152" stroke="#00FFEF" stroke-width="10"/>
+  <circle cx="74" cy="78" r="5" fill="#00FFEF"/>
+  <circle cx="92" cy="78" r="5" fill="#00FFEF" opacity="0.55"/>
+  <circle cx="110" cy="78" r="5" fill="#00FFEF" opacity="0.3"/>
+  <!-- camera shutter / shot mark -->
+  <circle cx="128" cy="138" r="28" stroke="#00FFEF" stroke-width="8" fill="none"/>
+  <circle cx="128" cy="138" r="12" fill="#00FFEF"/>
+  <!-- timeline ticks -->
+  <rect x="68" y="198" width="24" height="8" rx="4" fill="#00FFEF" opacity="0.35"/>
+  <rect x="100" y="198" width="24" height="8" rx="4" fill="#00FFEF" opacity="0.55"/>
+  <rect x="132" y="198" width="24" height="8" rx="4" fill="#00FFEF"/>
+  <rect x="164" y="198" width="24" height="8" rx="4" fill="#00FFEF" opacity="0.55"/>
+</svg>
