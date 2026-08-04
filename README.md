@@ -4,7 +4,7 @@
 
 ## Для сотрудников
 
-1. Скачайте **`ART-France-Drop-Domains.exe`** из [Releases](../../releases)
+1. Скачайте **`ART-France-Drop-Domains.exe`** из [Releases](https://github.com/VovchikMusulman/ART-France-Drop-Domains/releases)
 2. Запустите файл двойным кликом (установка не нужна)
 3. В **Настройках** вставьте ключи API (выдаёт руководитель) → вкладка **Дропы**: введите запрос и нажмите поиск
 
