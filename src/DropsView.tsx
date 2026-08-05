@@ -318,40 +318,133 @@ export default function DropsView({
       status: `Загружаю метрики для ${domain}…`,
     }));
 
-    const res = await window.artfrance.fetchDomainMetrics({
-      host: domain,
-      checkTrustKey: settings.checkTrustKey,
-      ahrefsApiKey: settings.ahrefsApiKey,
-    });
-
-    setSession((p) => {
-      const goodNext = p.good.map((row) => {
-        if (row.domain !== domain) return row;
+    const applyPartial = (patch: {
+      ageYears?: number | null;
+      iks?: number | null;
+      dr?: number | null;
+      waybackOldest?: string | null;
+      hasSnapshots2y?: boolean;
+      checkTrust?: DomainRow['checkTrust'];
+      reason?: string;
+      status?: string;
+    }) => {
+      setSession((p) => {
+        const goodNext = p.good.map((row) => {
+          if (row.domain !== domain) return row;
+          return {
+            ...row,
+            ageYears: patch.ageYears !== undefined ? patch.ageYears : row.ageYears,
+            iks: patch.iks !== undefined ? patch.iks : row.iks,
+            dr: patch.dr !== undefined ? patch.dr : row.dr,
+            waybackOldest:
+              patch.waybackOldest !== undefined ? patch.waybackOldest : row.waybackOldest,
+            hasSnapshots2y:
+              patch.hasSnapshots2y !== undefined ? patch.hasSnapshots2y : row.hasSnapshots2y,
+            checkTrust: patch.checkTrust !== undefined ? patch.checkTrust : row.checkTrust,
+            reason: patch.reason !== undefined ? patch.reason : row.reason,
+          };
+        });
         return {
-          ...row,
-          ageYears: res.ageYears ?? row.ageYears,
-          iks: res.iks ?? row.iks,
-          dr: res.dr ?? row.dr,
-          waybackOldest: res.waybackOldest ?? row.waybackOldest,
-          hasSnapshots2y: res.hasSnapshots2y ?? row.hasSnapshots2y,
-          checkTrust: res.checkTrust !== undefined ? res.checkTrust : row.checkTrust,
-          reason: res.checkTrust?.metrics
-            ? 'свободен · метрики загружены'
-            : res.error
-              ? `свободен · ${res.error}`
-              : row.reason,
+          ...p,
+          good: goodNext,
+          selectedDomain: p.selectedDomain || domain,
+          status: patch.status ?? p.status,
         };
       });
-      return {
+    };
+
+    try {
+      // Ahrefs DR quickly (if key), then long CheckTrust poll with live status
+      if (settings.ahrefsApiKey?.trim()) {
+        const quick = await window.artfrance.fetchDomainMetrics({
+          host: domain,
+          checkTrustKey: '',
+          ahrefsApiKey: settings.ahrefsApiKey,
+          maxAttempts: 1,
+        });
+        if (quick.dr != null) {
+          applyPartial({
+            dr: quick.dr,
+            status: `DR загружен · жду CheckTrust для ${domain}…`,
+          });
+        }
+      }
+
+      if (settings.checkTrustKey?.trim()) {
+        const POLL_ATTEMPTS = 48; // ~4 мин
+        const POLL_DELAY_MS = 5000;
+        let lastError = '';
+        let lastCode = '';
+        let gotCt = false;
+
+        for (let attempt = 1; attempt <= POLL_ATTEMPTS; attempt += 1) {
+          setSession((p) => ({
+            ...p,
+            status:
+              attempt === 1
+                ? `CheckTrust: запрос по ${domain}…`
+                : `CheckTrust считает метрики ${domain}… ${attempt}/${POLL_ATTEMPTS}`,
+          }));
+
+          const res = await window.artfrance.lookupCheckTrust({
+            host: domain,
+            applicationKey: settings.checkTrustKey,
+            maxAttempts: 1,
+          });
+
+          if (res?.ok) {
+            gotCt = true;
+            applyPartial({
+              ageYears: res.ageYears ?? null,
+              iks: res.sqi ?? null,
+              waybackOldest: null,
+              hasSnapshots2y:
+                res.ageYears != null ? res.ageYears >= (settings.minAgeYears || 2) : false,
+              checkTrust: {
+                sqi: res.sqi,
+                ageYears: res.ageYears,
+                webarchiveDays: res.webarchiveDays,
+                metrics: res.metrics || null,
+              },
+              reason: 'свободен · метрики загружены',
+              status: `Метрики готовы: ${domain}`,
+            });
+            break;
+          }
+
+          lastCode = res?.code || '';
+          lastError = res?.error || 'CheckTrust не ответил';
+
+          if (res?.code !== 'CT_IN_PROCESS') {
+            applyPartial({
+              checkTrust: { error: lastError, code: lastCode || undefined },
+              status: `Метрики ${domain}: ${lastError}`,
+            });
+            break;
+          }
+
+          if (attempt < POLL_ATTEMPTS) {
+            await new Promise((r) => setTimeout(r, POLL_DELAY_MS));
+          }
+        }
+
+        if (!gotCt && lastCode === 'CT_IN_PROCESS') {
+          applyPartial({
+            checkTrust: {
+              error:
+                'CheckTrust ещё считает метрики. Подождите и нажмите «Обновить метрики» ещё раз — анализ уже запущен.',
+              code: 'CT_IN_PROCESS',
+            },
+            status: `CheckTrust ещё считает ${domain} — нажмите «Обновить метрики» через минуту`,
+          });
+        }
+      }
+    } finally {
+      setSession((p) => ({
         ...p,
-        good: goodNext,
-        metricsLoadingDomain: null,
-        selectedDomain: p.selectedDomain || domain,
-        status: res.ok
-          ? `Метрики: ${domain}`
-          : `Метрики ${domain}: ${res.error || 'не загрузились'}`,
-      };
-    });
+        metricsLoadingDomain: p.metricsLoadingDomain === domain ? null : p.metricsLoadingDomain,
+      }));
+    }
   }
 
   async function handleExport(kind: 'good' | 'bad') {

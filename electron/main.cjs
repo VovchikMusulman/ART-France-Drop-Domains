@@ -382,7 +382,7 @@ ipcMain.handle('checktrust:lookup', async (_event, payload) => {
 
 /** On-demand metrics for one Good domain (CheckTrust + Ahrefs DR). */
 ipcMain.handle('domain:metrics', async (_event, payload) => {
-  const { fetchCheckTrust } = require('./checktrust.cjs');
+  const { fetchCheckTrust, DEFAULT_POLL_ATTEMPTS, DEFAULT_POLL_DELAY_MS } = require('./checktrust.cjs');
   const { fetchDomainRating } = require('./ahrefs.cjs');
   const settings = readSettings();
   const host = String(payload?.host || '')
@@ -414,11 +414,18 @@ ipcMain.handle('domain:metrics', async (_event, payload) => {
   let dr = null;
   const notes = [];
 
+  // Ahrefs DR — быстро, параллельно с долгим CheckTrust
+  const ahPromise = ahKey
+    ? fetchDomainRating(host, ahKey)
+    : Promise.resolve(null);
+
   if (ctKey) {
-    const ct = await fetchCheckTrust(host, ctKey, {
-      maxAttempts: Number(payload?.maxAttempts) > 0 ? Number(payload.maxAttempts) : 24,
-      delayMs: Number(payload?.delayMs) > 0 ? Number(payload.delayMs) : 5000,
-    });
+    // Новые хосты у CheckTrust часто считают 2–4 минуты
+    const maxAttempts =
+      Number(payload?.maxAttempts) > 0 ? Number(payload.maxAttempts) : Math.max(DEFAULT_POLL_ATTEMPTS, 48);
+    const delayMs =
+      Number(payload?.delayMs) > 0 ? Number(payload.delayMs) : DEFAULT_POLL_DELAY_MS;
+    const ct = await fetchCheckTrust(host, ctKey, { maxAttempts, delayMs });
     if (ct.ok) {
       ageYears = ct.ageYears ?? null;
       iks = ct.sqi ?? null;
@@ -438,8 +445,8 @@ ipcMain.handle('domain:metrics', async (_event, payload) => {
     notes.push('CheckTrust key не задан');
   }
 
-  if (ahKey) {
-    const ah = await fetchDomainRating(host, ahKey);
+  const ah = await ahPromise;
+  if (ah) {
     if (ah.ok) {
       dr = ah.dr;
     } else {
@@ -449,7 +456,7 @@ ipcMain.handle('domain:metrics', async (_event, payload) => {
 
   const hasAny = Boolean(checkTrust?.metrics) || dr != null;
   return {
-    ok: hasAny || Boolean(checkTrust),
+    ok: hasAny,
     host,
     ageYears,
     iks,
@@ -458,6 +465,7 @@ ipcMain.handle('domain:metrics', async (_event, payload) => {
     hasSnapshots2y: ageYears != null ? ageYears >= (Number(settings.minAgeYears) || 2) : false,
     checkTrust,
     error: hasAny ? undefined : notes.filter(Boolean).join(' · ') || undefined,
+    code: checkTrust?.code,
   };
 });
 

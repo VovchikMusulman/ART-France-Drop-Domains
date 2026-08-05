@@ -253,23 +253,6 @@ async function runPipeline(options, hooks = {}) {
       let out;
       try {
         out = await session.getOutgoingDomains(source.domain);
-        const count = out.domains?.length || 0;
-        if (count) {
-          emit('success', `${source.domain}: нашёл ${count} доменов для проверки`);
-        } else {
-          const reason = out.note ? ` — ${out.note}` : '';
-          emit('warn', `${source.domain}: исходящих доменов не найдено${reason}`);
-          // If Semrush consistently fails to return the API payload, stop burning queries
-          if (
-            out.source === 'none' &&
-            /лимит|подписк|не получен ответ Outbound API/i.test(String(out.note || ''))
-          ) {
-            emit(
-              'warn',
-              'Похоже, Semrush не отдаёт Outbound Domains (лимит Free или нет доступа к отчёту). Проверьте подписку в браузере на странице Outbound Domains.'
-            );
-          }
-        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         const code = err?.code || '';
@@ -296,23 +279,58 @@ async function runPipeline(options, hooks = {}) {
         continue;
       }
 
-      const candidates = (
+      const rawEntries = (
         out.entries?.length
           ? out.entries
           : (out.domains || []).map((domain) => ({ domain, as: null, dr: null }))
-      ).slice(0, maxOutlinksPerSource);
+      ).filter((e) => e?.domain);
+      const limited = rawEntries.slice(0, maxOutlinksPerSource);
+      const truncated = Math.max(0, rawEntries.length - limited.length);
+
+      const fresh = [];
+      let skippedDup = 0;
+      for (const entry of limited) {
+        if (seen.has(entry.domain)) {
+          skippedDup += 1;
+          continue;
+        }
+        seen.add(entry.domain);
+        fresh.push(entry);
+      }
+
+      if (!rawEntries.length) {
+        const reason = out.note ? ` — ${out.note}` : '';
+        emit('warn', `${source.domain}: исходящих доменов не найдено${reason}`);
+        if (
+          out.source === 'none' &&
+          /лимит|подписк|не получен ответ Outbound API/i.test(String(out.note || ''))
+        ) {
+          emit(
+            'warn',
+            'Похоже, Semrush не отдаёт Outbound Domains (лимит Free или нет доступа к отчёту). Проверьте подписку в браузере на странице Outbound Domains.'
+          );
+        }
+      } else {
+        const parts = [`Semrush: ${rawEntries.length}`];
+        if (truncated) parts.push(`лимит ${maxOutlinksPerSource}, отброшено ${truncated}`);
+        if (skippedDup) parts.push(`уже встречались: ${skippedDup}`);
+        parts.push(`к проверке: ${fresh.length}`);
+        emit(
+          fresh.length ? 'success' : 'info',
+          `${source.domain}: ${parts.join(' · ')}`
+        );
+      }
+
       let candIndex = 0;
-      for (const candidate of candidates) {
+      for (const candidate of fresh) {
         assertNotAborted();
         candIndex += 1;
         const domain = candidate.domain;
-        if (!domain || seen.has(domain)) continue;
-        seen.add(domain);
         const semrushAs =
           candidate.as != null && Number.isFinite(Number(candidate.as)) ? Number(candidate.as) : null;
 
         const basePercent = 40 + Math.round(((sourceIndex - 1) / sources.length) * 60);
-        const inner = Math.round((candIndex / Math.max(candidates.length, 1)) * (60 / sources.length));
+        const inner = Math.round((candIndex / Math.max(fresh.length, 1)) * (60 / sources.length));
         onProgress({
           phase: 'check',
           percent: Math.min(99, basePercent + inner),
@@ -395,12 +413,6 @@ async function runPipeline(options, hooks = {}) {
       'success',
       `Готово: свободных ${good.length}, занятых ${bad.length}. Метрики загружайте кнопкой по выбранному домену.`
     );
-    if (!good.length && bad.length) {
-      emit(
-        'info',
-        'Свободных не нашлось среди исходящих ссылок конкурентов — так бывает часто. Попробуйте другой запрос.'
-      );
-    }
   }
 
   return {

@@ -146,7 +146,7 @@ const LIMITS_ERROR =
   'На CheckTrust не хватает средств. Пополните баланс и проверьте домен во вкладке CheckTrust.';
 
 const IN_PROCESS_ERROR =
-  'CheckTrust не успел посчитать метрики. Нажмите «Проверить» ещё раз — анализ уже идёт на стороне сервиса.';
+  'CheckTrust ещё считает метрики. Подождите и нажмите «Обновить метрики» ещё раз — анализ уже запущен на стороне сервиса.';
 
 /** Default poll: full parameterList (Majestic/Keys.so/…) often needs 1–3 min for a new host */
 const DEFAULT_POLL_ATTEMPTS = 36;

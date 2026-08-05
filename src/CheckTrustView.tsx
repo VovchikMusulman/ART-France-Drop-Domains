@@ -202,7 +202,7 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
       if (runId !== activeCheckRunId) return;
       patch({
         error:
-          'CheckTrust не успел посчитать метрики за ~3 минуты. Нажмите «Проверить» ещё раз — анализ уже запущен.',
+          'CheckTrust не успел посчитать метрики за ~3 минуты. Нажмите «Проверить» ещё раз — анализ уже запущен на стороне сервиса.',
         errorCode: lastCode || 'CT_IN_PROCESS',
         progress: '',
         loading: false,
