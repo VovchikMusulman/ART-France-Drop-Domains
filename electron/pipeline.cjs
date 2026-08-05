@@ -127,6 +127,8 @@ async function runPipeline(options, hooks = {}) {
   const seen = new Set();
   let ctLimitsHit = false;
 
+  const provider = String(searchProvider || 'serper').toLowerCase() === 'yandex' ? 'yandex' : 'serper';
+
   if (!String(checkTrustKey || '').trim()) {
     emit('warn', 'Нет ключа CheckTrust — показатели ИКС и возраста не загрузятся');
   }
@@ -134,7 +136,6 @@ async function runPipeline(options, hooks = {}) {
     emit('warn', 'Нет ключа Ahrefs — Domain Rating (DR) не загрузится');
   }
 
-  const provider = String(searchProvider || 'serper').toLowerCase() === 'yandex' ? 'yandex' : 'serper';
   if (provider === 'yandex') {
     emit('info', `Ищу топ-5 сайтов в Яндексе по запросу «${query}»…`);
   } else {
