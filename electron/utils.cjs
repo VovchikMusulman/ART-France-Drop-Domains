@@ -84,10 +84,46 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Human-readable network / fetch errors (Node undici / Electron fetch). */
+function formatNetworkError(err, serviceLabel = 'Сервис') {
+  const label = String(serviceLabel || 'Сервис');
+  const msg = err instanceof Error ? err.message : String(err || '');
+  const cause = err && typeof err === 'object' ? err.cause : null;
+  const code = String(cause?.code || err?.code || '').toUpperCase();
+  const causeMsg = cause instanceof Error ? cause.message : String(cause?.message || cause || '');
+
+  if (
+    /fetch failed|network|ECONN|ENOTFOUND|ETIMEDOUT|UND_ERR|CONNECT_TIMEOUT|CERT_|SSL/i.test(
+      `${msg} ${code} ${causeMsg}`
+    )
+  ) {
+    if (/ENOTFOUND|getaddrinfo/i.test(`${code} ${causeMsg}`)) {
+      return `${label}: нет DNS до сервера. Проверьте интернет или DNS VPN.`;
+    }
+    if (/CERT_|SSL|UNABLE_TO_VERIFY/i.test(`${code} ${causeMsg} ${msg}`)) {
+      return `${label}: ошибка SSL/сертификата. Проверьте дату на ПК и VPN.`;
+    }
+    if (/TIMEOUT|ETIMEDOUT|UND_ERR_CONNECT/i.test(`${code} ${causeMsg} ${msg}`)) {
+      return (
+        `${label}: нет связи с API (таймаут). ` +
+        `Часто мешает VPN: зарубежный TUN нужен для Semrush, но может блокировать Yandex Cloud. ` +
+        `Смените сервер VPN или временно используйте поиск Serper (Google).`
+      );
+    }
+    return (
+      `${label}: нет связи с API (${code || 'сеть'}). ` +
+      `Проверьте интернет и VPN. Для режима Яндекс API должен быть доступен searchapi.api.cloud.yandex.net.`
+    );
+  }
+
+  return msg || `${label}: неизвестная ошибка`;
+}
+
 module.exports = {
   NOISE_DOMAINS,
   rootDomain,
   extractDomainFromUrl,
   isNoiseDomain,
   sleep,
+  formatNetworkError,
 };

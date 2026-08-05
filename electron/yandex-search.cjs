@@ -3,7 +3,7 @@ const {
   findYandexRegion,
   searchTypeForRegion,
 } = require('./yandex-regions.cjs');
-const { sleep } = require('./utils.cjs');
+const { sleep, formatNetworkError } = require('./utils.cjs');
 
 const WEB_SEARCH_URL = 'https://searchapi.api.cloud.yandex.net/v2/web/search';
 const WEB_SEARCH_ASYNC_URL = 'https://searchapi.api.cloud.yandex.net/v2/web/searchAsync';
@@ -76,15 +76,20 @@ async function decodeRawData(payload) {
 }
 
 async function searchSync(apiKey, body) {
-  const res = await fetch(WEB_SEARCH_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Api-Key ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(45000),
-  });
+  let res;
+  try {
+    res = await fetch(WEB_SEARCH_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Api-Key ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(45000),
+    });
+  } catch (err) {
+    throw new Error(formatNetworkError(err, 'Yandex Search'));
+  }
   const text = await res.text();
   let json = null;
   try {
@@ -101,15 +106,20 @@ async function searchSync(apiKey, body) {
 }
 
 async function searchAsync(apiKey, body) {
-  const startRes = await fetch(WEB_SEARCH_ASYNC_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Api-Key ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(30000),
-  });
+  let startRes;
+  try {
+    startRes = await fetch(WEB_SEARCH_ASYNC_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Api-Key ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30000),
+    });
+  } catch (err) {
+    throw new Error(formatNetworkError(err, 'Yandex Search'));
+  }
   const startText = await startRes.text();
   let startJson = null;
   try {
@@ -131,10 +141,15 @@ async function searchAsync(apiKey, body) {
   const deadline = Date.now() + 60000;
   while (Date.now() < deadline) {
     await sleep(1000);
-    const pollRes = await fetch(`${OPERATIONS_URL}${encodeURIComponent(opId)}`, {
-      headers: { Authorization: `Api-Key ${apiKey}` },
-      signal: AbortSignal.timeout(20000),
-    });
+    let pollRes;
+    try {
+      pollRes = await fetch(`${OPERATIONS_URL}${encodeURIComponent(opId)}`, {
+        headers: { Authorization: `Api-Key ${apiKey}` },
+        signal: AbortSignal.timeout(20000),
+      });
+    } catch {
+      continue;
+    }
     const pollText = await pollRes.text();
     let pollJson = null;
     try {
@@ -181,7 +196,10 @@ async function searchOrganicYandex({ apiKey, folderId, query, num = 5, regionId 
     } catch (asyncErr) {
       const syncMsg = syncErr instanceof Error ? syncErr.message : String(syncErr);
       const asyncMsg = asyncErr instanceof Error ? asyncErr.message : String(asyncErr);
-      throw new Error(`Yandex Search: ${asyncMsg || syncMsg}`);
+      // Prefer the clearer network hint; avoid "Yandex Search: Yandex Search: …"
+      if (/нет связи|таймаут|DNS|SSL/i.test(asyncMsg)) throw new Error(asyncMsg);
+      if (/нет связи|таймаут|DNS|SSL/i.test(syncMsg)) throw new Error(syncMsg);
+      throw new Error(asyncMsg || syncMsg);
     }
   }
 
