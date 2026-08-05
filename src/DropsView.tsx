@@ -409,9 +409,11 @@ export default function DropsView({
               code: acc.code,
             },
             reason: done
-              ? acc.note
-                ? 'свободен · метрики CheckTrust (частично)'
-                : 'свободен · метрики загружены'
+              ? acc.code === 'OK_WAYBACK'
+                ? 'свободен · возраст Webarchive'
+                : acc.note
+                  ? 'свободен · метрики CheckTrust (частично)'
+                  : 'свободен · метрики загружены'
               : 'свободен · метрики загружаются…',
             status,
           });
@@ -430,6 +432,7 @@ export default function DropsView({
           if (res.metrics && typeof res.metrics === 'object') {
             for (const [key, value] of Object.entries(res.metrics)) {
               if (value == null || value === '' || value === -1 || value === '-1') continue;
+              if (/^0{4}-0{2}-0{2}/.test(String(value))) continue;
               metrics[key] = value;
             }
           }
@@ -441,7 +444,7 @@ export default function DropsView({
               ? String(res.webarchiveFirst)
               : acc.webarchiveFirst,
             metrics: Object.keys(metrics).length ? metrics : acc.metrics,
-            note: res.note || acc.note,
+            note: res.code === 'OK_WAYBACK' ? undefined : res.note || acc.note,
             code: res.code || acc.code,
           };
         };
@@ -495,6 +498,10 @@ export default function DropsView({
           lastCode = res?.code || '';
           lastError = res?.error || 'CheckTrust не ответил';
 
+          if (res?.code === 'CT_DONE_EMPTY') {
+            break;
+          }
+
           if (res?.code !== 'CT_IN_PROCESS' && res?.code !== 'CT_EMPTY') {
             if (acc.sqi != null || acc.ageYears != null || acc.metrics) {
               acc.note = lastError;
@@ -520,10 +527,15 @@ export default function DropsView({
               acc.note ||
               'Показаны метрики, которые успел отдать CheckTrust. Можно обновить позже.';
             applyAcc(`Метрики ${domain}: частичный ответ CheckTrust`, true);
-          } else if (lastCode === 'CT_IN_PROCESS' || lastCode === 'CT_EMPTY' || !lastCode) {
+          } else if (
+            lastCode === 'CT_IN_PROCESS' ||
+            lastCode === 'CT_EMPTY' ||
+            lastCode === 'CT_DONE_EMPTY' ||
+            !lastCode
+          ) {
             setSession((p) => ({
               ...p,
-              status: `CheckTrust не отдал данные — возраст ${domain} из Wayback…`,
+              status: `Возраст ${domain} из Webarchive…`,
             }));
             const fallback = await window.artfrance.lookupCheckTrust({
               host: domain,
@@ -533,10 +545,7 @@ export default function DropsView({
             });
             if (fallback?.ok) {
               mergeAcc(fallback);
-              applyAcc(
-                `Возраст ${domain} из Wayback (CheckTrust не ответил за ~8 мин)`,
-                true
-              );
+              applyAcc(`Возраст ${domain}: ${fallback.ageYears ?? '—'} лет`, true);
             } else {
               applyPartial({
                 checkTrust: {

@@ -108,6 +108,7 @@ export type CheckTrustLookupResult = {
   webarchiveFirst?: string | null;
   metrics?: Record<string, unknown> | null;
   note?: string;
+  source?: string;
   /** true = CheckTrust ещё считает, но часть полей уже есть */
   partial?: boolean;
 };

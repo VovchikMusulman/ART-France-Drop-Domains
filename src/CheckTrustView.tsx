@@ -66,12 +66,16 @@ export type CheckTrustResult = {
   metrics?: Record<string, unknown> | null;
   note?: string;
   pending?: boolean;
+  /** checktrust | wayback */
+  source?: string;
 };
 
 export type CheckTrustSession = {
   domain: string;
   loading: boolean;
   progress: string;
+  /** Текущая попытка опроса 1…POLL_ATTEMPTS */
+  progressAttempt: number;
   error: string;
   errorCode: string;
   result: CheckTrustResult | null;
@@ -82,6 +86,7 @@ export function emptyCheckTrustSession(): CheckTrustSession {
     domain: '',
     loading: false,
     progress: '',
+    progressAttempt: 0,
     error: '',
     errorCode: '',
     result: null,
@@ -105,6 +110,15 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function isPlaceholderValue(key: string, value: unknown) {
+  if (value == null || value === '') return true;
+  if (value === -1 || value === '-1') return true;
+  const s = String(value).trim();
+  if (!s || s === 'n/a' || s === 'N/A' || s === '-') return true;
+  if (/^0{4}-0{2}-0{2}/.test(s)) return true;
+  return false;
+}
+
 function mergeResult(
   prev: CheckTrustResult | null,
   res: {
@@ -113,23 +127,50 @@ function mergeResult(
     ageYears?: number | null;
     metrics?: Record<string, unknown> | null;
     note?: string;
+    code?: string;
+    source?: string;
   },
   pending: boolean
 ): CheckTrustResult {
   const metrics = { ...(prev?.metrics || {}) };
   if (res.metrics && typeof res.metrics === 'object') {
     for (const [key, value] of Object.entries(res.metrics)) {
-      if (value == null || value === '' || value === -1 || value === '-1') continue;
+      if (isPlaceholderValue(key, value)) continue;
+      // дни=0 без даты — заглушка
+      if (
+        (key === 'webarchiveDays' || key === 'webarchive_days') &&
+        (value === 0 || value === '0') &&
+        !metrics.webarchive
+      ) {
+        continue;
+      }
       metrics[key] = value;
     }
   }
+
+  let ageYears = res.ageYears ?? prev?.ageYears ?? null;
+  if (ageYears === 0) {
+    const days = Number(metrics.webarchiveDays);
+    const hasRealWa =
+      (Number.isFinite(days) && days > 0) || Boolean(metrics.webarchive);
+    if (!hasRealWa) ageYears = null;
+  }
+
+  const source =
+    res.source ||
+    (res.code === 'OK_WAYBACK' ? 'wayback' : undefined) ||
+    prev?.source ||
+    (pending ? undefined : 'checktrust');
+
   return {
     host: res.host || prev?.host,
     sqi: res.sqi ?? prev?.sqi ?? null,
-    ageYears: res.ageYears ?? prev?.ageYears ?? null,
+    ageYears,
     metrics: Object.keys(metrics).length ? metrics : null,
-    note: res.note || prev?.note,
+    // Не тащим «страшные» пояснения из Wayback — это нормальный результат
+    note: res.code === 'OK_WAYBACK' ? undefined : res.note || prev?.note,
     pending,
+    source,
   };
 }
 
@@ -138,7 +179,10 @@ function hasCore(result: CheckTrustResult | null) {
 }
 
 export default function CheckTrustView({ settings, session, setSession, onOpenSettings }: Props) {
-  const { domain, loading, progress, error, errorCode, result } = session;
+  const { domain, loading, progress, progressAttempt, error, errorCode, result } = session;
+  const progressPct = loading
+    ? Math.min(100, Math.round((Math.max(progressAttempt, 1) / POLL_ATTEMPTS) * 100))
+    : 0;
 
   const detailRows = useMemo(() => {
     const metrics = result?.metrics;
@@ -146,11 +190,13 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
     const rows: Array<{ key: string; label: string; value: unknown }> = [];
     for (const [key, label] of Object.entries(CT_LABELS)) {
       if (!(key in metrics)) continue;
+      if (isPlaceholderValue(key, metrics[key])) continue;
       rows.push({ key, label, value: metrics[key] });
     }
     for (const [key, value] of Object.entries(metrics)) {
       if (CT_LABELS[key]) continue;
       if (key.startsWith('_')) continue;
+      if (isPlaceholderValue(key, value)) continue;
       rows.push({ key, label: key, value });
     }
     return rows;
@@ -176,7 +222,8 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
       loading: true,
       error: '',
       errorCode: '',
-      progress: '',
+      progress: 'Запрос к CheckTrust…',
+      progressAttempt: 1,
       result: null,
     });
 
@@ -199,7 +246,7 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
             ? 'Запрос к CheckTrust…'
             : `CheckTrust считает метрики… ${attempt}/${POLL_ATTEMPTS}`;
 
-        patch({ progress: waitingHint });
+        patch({ progress: waitingHint, progressAttempt: attempt });
 
         const res = await window.artfrance?.lookupCheckTrust({
           host,
@@ -215,6 +262,7 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
           patch({
             result: acc,
             progress: '',
+            progressAttempt: 0,
             loading: false,
           });
           return;
@@ -228,12 +276,14 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
             error: '',
             errorCode: '',
             progress: waitingHint,
+            progressAttempt: attempt,
             loading: true,
           });
           if (hasCore(acc)) {
             patch({
               result: { ...acc, pending: false },
               progress: '',
+              progressAttempt: 0,
               loading: false,
             });
             return;
@@ -245,6 +295,11 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
         lastCode = res?.code || '';
         lastError = res?.error || 'Не удалось проверить домен';
 
+        // CT уже закончил с пустыми ИКС/возрастом — не ждём 8 мин и не жжём баланс
+        if (res?.code === 'CT_DONE_EMPTY') {
+          break;
+        }
+
         if (res?.code !== 'CT_IN_PROCESS' && res?.code !== 'CT_EMPTY') {
           // Если уже показали куски — оставляем их, ошибку только если пусто
           if (acc && (acc.sqi != null || acc.ageYears != null || acc.metrics)) {
@@ -255,6 +310,7 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
                 note: lastError,
               },
               progress: '',
+              progressAttempt: 0,
               loading: false,
             });
             return;
@@ -263,6 +319,7 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
             error: lastError,
             errorCode: lastCode,
             progress: '',
+            progressAttempt: 0,
             loading: false,
           });
           return;
@@ -286,13 +343,17 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
               'Показаны метрики, которые успел отдать CheckTrust. Можно нажать «Проверить» ещё раз позже.',
           },
           progress: '',
+          progressAttempt: 0,
           loading: false,
         });
         return;
       }
 
-      // CT ничего не отдал — только тогда Wayback для возраста
-      patch({ progress: 'CheckTrust не отдал данные — пробую возраст из Wayback…' });
+      // CT ничего не отдал — возраст из Wayback
+      patch({
+        progress: 'Беру возраст из Webarchive…',
+        progressAttempt: POLL_ATTEMPTS,
+      });
       const fallback = await window.artfrance?.lookupCheckTrust({
         host,
         applicationKey: settings.checkTrustKey,
@@ -304,8 +365,9 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
 
       if (fallback?.ok) {
         patch({
-          result: mergeResult(acc, fallback, false),
+          result: mergeResult(acc, { ...fallback, code: fallback.code }, false),
           progress: '',
+          progressAttempt: 0,
           loading: false,
         });
         return;
@@ -317,6 +379,7 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
           'CheckTrust не успел посчитать метрики за отведённое время. Нажмите «Проверить» ещё раз — анализ уже запущен на стороне сервиса.',
         errorCode: fallback?.code || lastCode || 'CT_IN_PROCESS',
         progress: '',
+        progressAttempt: 0,
         loading: false,
       });
     } catch (err) {
@@ -324,6 +387,7 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
       patch({
         error: err instanceof Error ? err.message : 'Ошибка запроса',
         progress: '',
+        progressAttempt: 0,
         loading: false,
       });
     }
@@ -334,11 +398,8 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
       <section className="panel">
         <h2>Проверка CheckTrust</h2>
         <p className="muted">
-          Если во время поиска закончились средства, здесь можно позже вручную проверить свободные
-          домены после пополнения баланса. Запрашиваются ИКС и возраст Webarchive. CheckTrust считает
-          метрики постепенно — приложение показывает их сразу, как только появляются, и продолжает
-          ждать остальные (до ~8 мин). Wayback используется только если CheckTrust за это время
-          ничего не отдал.
+          Ручная проверка домена в CheckTrust (ИКС и возраст). Ожидание до ~8 мин — метрики
+          появляются по мере поступления.
         </p>
 
         {!settings.checkTrustKey?.trim() ? (
@@ -375,7 +436,22 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
           </button>
         </div>
 
-        {progress ? <div className="status-pill warn">{progress}</div> : null}
+        {loading ? (
+          <div className="ct-progress-block">
+            <div
+              className="progress ct-progress-bar"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={progressPct}
+            >
+              <span style={{ width: `${progressPct}%` }} />
+            </div>
+            {progress ? <div className="ct-progress-label">{progress}</div> : null}
+          </div>
+        ) : null}
+
+        {!loading && progress ? <div className="status-pill warn">{progress}</div> : null}
 
         {error ? (
           <div
@@ -408,10 +484,13 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
               </span>
             </div>
             {result.pending ? (
-              <div className="status-pill warn">Метрики приходят с CheckTrust — жду остальные…</div>
+              <div className="muted">Метрики обновляются…</div>
             ) : null}
-            {result.note && !result.pending ? (
-              <div className="status-pill warn">{result.note}</div>
+            {!result.pending && result.source === 'wayback' && result.ageYears != null ? (
+              <div className="muted">Возраст из Webarchive · ИКС для этого домена недоступен</div>
+            ) : null}
+            {!result.pending && result.note && result.source !== 'wayback' ? (
+              <div className="muted">{result.note}</div>
             ) : null}
             <div className="detail-list">
               {detailRows.length === 0 ? (

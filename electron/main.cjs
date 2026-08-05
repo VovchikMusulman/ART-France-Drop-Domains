@@ -301,13 +301,16 @@ ipcMain.handle('export:csv', async (_event, payload) => {
     'checked_at',
   ];
 
+  // В русской Excel разделитель столбцов — «;», не «,»
+  const SEP = ';';
+
   const escape = (value) => {
     const s = value == null ? '' : String(value);
-    if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+    if (/[";\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
     return s;
   };
 
-  const lines = [header.join(',')];
+  const lines = [header.join(SEP)];
   for (const row of rows) {
     lines.push(
       [
@@ -322,7 +325,7 @@ ipcMain.handle('export:csv', async (_event, payload) => {
         row.checkedAt,
       ]
         .map(escape)
-        .join(',')
+        .join(SEP)
     );
   }
 

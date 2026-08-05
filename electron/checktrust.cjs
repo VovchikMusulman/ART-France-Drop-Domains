@@ -192,26 +192,49 @@ function digMetricsBlob(root, domain) {
   return metrics && typeof metrics === 'object' ? metrics : null;
 }
 
-/** Есть ли хоть что-то полезное (ИКС / возраст / траст), даже при «in process». */
+/** CheckTrust часто отдаёт «заглушки», пока считает: -1, 0000-00-00, дни=0 без даты */
+function isPlaceholderMetricValue(key, value) {
+  if (value == null || value === '') return true;
+  if (value === -1 || value === '-1') return true;
+  const s = String(value).trim();
+  if (!s || s === 'n/a' || s === 'N/A' || s === '-') return true;
+  if (/^0{4}-0{2}-0{2}/.test(s)) return true;
+  return false;
+}
+
+function sanitizeMetrics(metrics) {
+  if (!metrics || typeof metrics !== 'object') return null;
+  const out = {};
+  for (const [key, value] of Object.entries(metrics)) {
+    if (key === 'success' || key === 'message' || key === 'error' || key.startsWith('_')) continue;
+    if (isPlaceholderMetricValue(key, value)) continue;
+    out[key] = value;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/** Есть ли хоть что-то полезное (ИКС / возраст), даже при «in process». */
 function extractUsableFields(metrics) {
   if (!metrics || typeof metrics !== 'object') {
     return { usable: false, sqi: null, webarchiveDays: null, ageYears: null, webarchiveFirst: null };
   }
   let sqi = toNumber(metrics.sqi ?? metrics.SQI ?? metrics.iks);
   if (sqi != null && sqi < 0) sqi = null;
+
+  let webarchiveFirst = metrics.webarchive ?? metrics.webarchiveFirst ?? null;
+  if (isPlaceholderMetricValue('webarchive', webarchiveFirst)) webarchiveFirst = null;
+
   let webarchiveDays = toNumber(metrics.webarchiveDays ?? metrics.webarchive_days);
   if (webarchiveDays != null && webarchiveDays < 0) webarchiveDays = null;
+  // 0 дней без реальной даты — заглушка CheckTrust, не возраст
+  if (webarchiveDays === 0 && !webarchiveFirst) webarchiveDays = null;
+
   const ageYears =
     webarchiveDays != null ? Math.max(0, Math.floor(webarchiveDays / 365.25)) : null;
-  let webarchiveFirst = metrics.webarchive ?? metrics.webarchiveFirst ?? null;
-  if (webarchiveFirst === -1 || webarchiveFirst === '-1') webarchiveFirst = null;
-  const trust = toNumber(metrics.trust);
-  const usable =
-    sqi != null ||
-    webarchiveDays != null ||
-    (trust != null && trust >= 0) ||
-    Boolean(webarchiveFirst && String(webarchiveFirst).length > 2);
-  return { usable, sqi, webarchiveDays, ageYears, webarchiveFirst, trust };
+
+  // trust=0 / spam=-1 сами по себе не считаем «метриками пришли»
+  const usable = sqi != null || webarchiveDays != null || Boolean(webarchiveFirst);
+  return { usable, sqi, webarchiveDays, ageYears, webarchiveFirst };
 }
 
 /** Для basic-набора достаточно ИКС + возраста — можно завершать опрос раньше. */
@@ -220,7 +243,7 @@ function hasCoreMetrics(fieldsOrResult) {
   const sqi = fieldsOrResult.sqi;
   const age =
     fieldsOrResult.ageYears != null ||
-    fieldsOrResult.webarchiveDays != null ||
+    (fieldsOrResult.webarchiveDays != null && fieldsOrResult.webarchiveDays > 0) ||
     Boolean(fieldsOrResult.webarchiveFirst);
   return sqi != null && age;
 }
@@ -229,7 +252,7 @@ function mergeMetricMaps(prev, next) {
   const out = { ...(prev && typeof prev === 'object' ? prev : {}) };
   if (!next || typeof next !== 'object') return out;
   for (const [key, value] of Object.entries(next)) {
-    if (value == null || value === '' || value === -1 || value === '-1') continue;
+    if (isPlaceholderMetricValue(key, value)) continue;
     out[key] = value;
   }
   return out;
@@ -251,8 +274,9 @@ function interpretResponse(domain, res, json) {
   }
 
   // Сначала пробуем вытащить метрики — CheckTrust отдаёт поля постепенно, пока «in process»
-  const metricsCandidate =
-    digMetricsBlob(body, domain) || digMetricsBlob(json, domain) || null;
+  const metricsCandidate = sanitizeMetrics(
+    digMetricsBlob(body, domain) || digMetricsBlob(json, domain) || null
+  );
   const fields = extractUsableFields(metricsCandidate);
 
   if (fields.usable) {
@@ -296,6 +320,20 @@ function interpretResponse(domain, res, json) {
     };
   }
 
+  // Расчёт на стороне CT уже завершён, но ИКС/возраст — заглушки (-1 / 0000-00-00).
+  // Повторные запросы только тратят баланс — дальше UI/Wayback.
+  if (res.ok && body?.success === true) {
+    return {
+      ok: false,
+      code: 'CT_DONE_EMPTY',
+      error:
+        'CheckTrust завершил проверку, но не вернул ИКС/возраст (типично для free-доменов без сайта).',
+      metrics: metricsCandidate,
+      balance: body?.hostLimitsBalance ?? json?.hostLimitsBalance,
+      raw: body || json,
+    };
+  }
+
   if (!res.ok) {
     const errText =
       body?.error || body?.message || json?.error || json?.message || `CheckTrust HTTP ${res.status}`;
@@ -322,30 +360,31 @@ function interpretResponse(domain, res, json) {
     return { ok: false, code: 'API', error: errText, metrics: null, raw: body };
   }
 
-  let metrics = digMetricsBlob(body, domain) || {};
-  if (metrics.success === false) {
-    if (isLimitsPayload(metrics)) {
-      return { ok: false, code: 'CT_LIMITS', error: LIMITS_ERROR, metrics: null, raw: metrics };
+  let metricsRaw = digMetricsBlob(body, domain) || {};
+  if (metricsRaw.success === false) {
+    if (isLimitsPayload(metricsRaw)) {
+      return { ok: false, code: 'CT_LIMITS', error: LIMITS_ERROR, metrics: null, raw: metricsRaw };
     }
-    if (isInProcessPayload(metrics)) {
-      return { ok: false, code: 'CT_IN_PROCESS', error: IN_PROCESS_ERROR, metrics: null, raw: metrics };
+    if (isInProcessPayload(metricsRaw)) {
+      return { ok: false, code: 'CT_IN_PROCESS', error: IN_PROCESS_ERROR, metrics: null, raw: metricsRaw };
     }
     return {
       ok: false,
       code: 'API',
-      error: String(metrics.message || metrics.error || 'CheckTrust ошибка'),
+      error: String(metricsRaw.message || metricsRaw.error || 'CheckTrust ошибка'),
       metrics: null,
-      raw: metrics,
+      raw: metricsRaw,
     };
   }
 
+  const metrics = sanitizeMetrics(metricsRaw) || {};
   const finalFields = extractUsableFields(metrics);
   if (!finalFields.usable) {
     return {
       ok: false,
       code: 'CT_EMPTY',
       error: 'CheckTrust не вернул ИКС/возраст по этому домену',
-      metrics: metrics || null,
+      metrics: Object.keys(metrics).length ? metrics : null,
       raw: body || json,
     };
   }
@@ -466,6 +505,9 @@ async function fetchCheckTrust(host, applicationKey, options = {}) {
         return merged;
       }
 
+      // CT уже закончил с пустыми ИКС/возрастом — не жжём баланс повторными запросами
+      if (last.code === 'CT_DONE_EMPTY') break;
+
       if (last.code !== 'CT_IN_PROCESS' && last.code !== 'CT_EMPTY') return last;
       if (attempt < maxAttempts) await sleep(delayMs);
     }
@@ -480,7 +522,7 @@ async function fetchCheckTrust(host, applicationKey, options = {}) {
         error: undefined,
         note:
           bestPartial.note ||
-          'CheckTrust ещё не закрыл расчёт полностью — показаны метрики, которые уже пришли.',
+          'Показаны уже пришедшие метрики CheckTrust.',
       };
     }
 
@@ -511,8 +553,7 @@ async function fetchCheckTrust(host, applicationKey, options = {}) {
             webarchiveDays: ageYears != null ? Math.round(ageYears * 365.25) : null,
             ageYears,
             webarchiveFirst,
-            note:
-              'CheckTrust не отдал метрики за отведённое время; возраст взят из Wayback Machine. ИКС для free-домена часто недоступен.',
+            source: 'wayback',
           };
         }
         if (wb?.ok && !wb.oldest) {
@@ -520,7 +561,7 @@ async function fetchCheckTrust(host, applicationKey, options = {}) {
             ok: false,
             code: 'CT_NO_DATA',
             error:
-              'CheckTrust не посчитал метрики за отведённое время, а в Wayback нет снимков. Нажмите «Проверить» ещё раз позже.',
+              'CheckTrust не вернул ИКС/возраст, и в Wayback нет снимков этого домена.',
             metrics: null,
           };
         }
@@ -575,6 +616,9 @@ module.exports = {
   isInProcessPayload,
   hasCoreMetrics,
   mergeMetricMaps,
+  interpretResponse,
+  sanitizeMetrics,
+  extractUsableFields,
   LIMITS_ERROR,
   IN_PROCESS_ERROR,
   DEFAULT_POLL_ATTEMPTS,
