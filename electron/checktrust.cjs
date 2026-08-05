@@ -1,4 +1,5 @@
-const PARAMETER_LIST = [
+/** Полный набор (медленно: Majestic / Keys.so / LRT могут считать много минут) */
+const PARAMETER_LIST_FULL = [
   'trust',
   'spam',
   'sqi',
@@ -48,6 +49,24 @@ const PARAMETER_LIST = [
   'lrtBacklinks',
   'lrtRefDomains',
 ].join(',');
+
+/** Базовый набор для UI: ИКС + возраст Webarchive — обычно приходит за 1–2 мин */
+const PARAMETER_LIST_BASIC = [
+  'trust',
+  'spam',
+  'sqi',
+  'hostQuality',
+  'statusCode',
+  'hasSsl',
+  'yaIndex',
+  'googleIndex',
+  'webarchive',
+  'webarchiveDays',
+  'ip',
+].join(',');
+
+/** @deprecated alias — по умолчанию больше не тянем полный список */
+const PARAMETER_LIST = PARAMETER_LIST_BASIC;
 
 /** Human-readable labels for detail panel */
 const PARAM_LABELS = {
@@ -146,10 +165,10 @@ const LIMITS_ERROR =
   'На CheckTrust не хватает средств. Пополните баланс и проверьте домен во вкладке CheckTrust.';
 
 const IN_PROCESS_ERROR =
-  'CheckTrust ещё считает метрики. Подождите и нажмите «Обновить метрики» ещё раз — анализ уже запущен на стороне сервиса.';
+  'CheckTrust ещё считает метрики. Подождите — приложение продолжает опрос; если сообщение останется, нажмите кнопку ещё раз.';
 
-/** Default poll: full parameterList (Majestic/Keys.so/…) often needs 1–3 min for a new host */
-const DEFAULT_POLL_ATTEMPTS = 36;
+/** Default poll for basic list: обычно хватает 1–3 мин; запас до ~8 мин */
+const DEFAULT_POLL_ATTEMPTS = 96;
 const DEFAULT_POLL_DELAY_MS = 5000;
 
 function unwrapBody(json) {
@@ -271,12 +290,12 @@ function interpretResponse(domain, res, json) {
   };
 }
 
-async function requestCheckTrustOnce(domain, applicationKey) {
+async function requestCheckTrustOnce(domain, applicationKey, parameterList = PARAMETER_LIST_BASIC) {
   const url =
     `https://checktrust.ru/app.php?r=host/app/summary/basic` +
     `&applicationKey=${encodeURIComponent(applicationKey.trim())}` +
     `&host=${encodeURIComponent(domain)}` +
-    `&parameterList=${encodeURIComponent(PARAMETER_LIST)}`;
+    `&parameterList=${encodeURIComponent(parameterList)}`;
 
   const res = await fetch(url, {
     headers: { Accept: 'application/json' },
@@ -299,8 +318,9 @@ async function requestCheckTrustOnce(domain, applicationKey) {
 }
 
 /**
- * Fetch full CheckTrust host summary.
- * Polls while API returns "Waiting for data" / "Host is in process."
+ * Fetch host summary from CheckTrust.
+ * By default uses BASIC parameter list (sqi + webarchive) so first request finishes in time.
+ * Pass { full: true } for the heavy Majestic/Keys.so/LRT set.
  * Pass { maxAttempts: 1 } for a single shot (UI can poll itself).
  * @see https://checktrust.ru/cabinet/api.html
  */
@@ -324,12 +344,15 @@ async function fetchCheckTrust(host, applicationKey, options = {}) {
   const delayMs =
     Number(options.delayMs) > 0 ? Number(options.delayMs) : DEFAULT_POLL_DELAY_MS;
   const onAttempt = typeof options.onAttempt === 'function' ? options.onAttempt : null;
+  const parameterList =
+    options.parameterList ||
+    (options.full ? PARAMETER_LIST_FULL : PARAMETER_LIST_BASIC);
 
   try {
     let last = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       onAttempt?.({ attempt, maxAttempts, domain });
-      last = await requestCheckTrustOnce(domain, applicationKey);
+      last = await requestCheckTrustOnce(domain, applicationKey, parameterList);
       if (last.ok || last.code !== 'CT_IN_PROCESS') return last;
       if (attempt < maxAttempts) await sleep(delayMs);
     }
@@ -369,6 +392,8 @@ function metricsToDetails(metrics) {
 
 module.exports = {
   PARAMETER_LIST,
+  PARAMETER_LIST_BASIC,
+  PARAMETER_LIST_FULL,
   PARAM_LABELS,
   fetchCheckTrust,
   metricsToDetails,

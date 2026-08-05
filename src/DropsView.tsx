@@ -371,7 +371,7 @@ export default function DropsView({
       }
 
       if (settings.checkTrustKey?.trim()) {
-        const POLL_ATTEMPTS = 48; // ~4 мин
+        const POLL_ATTEMPTS = 96; // ~8 мин, basic metrics
         const POLL_DELAY_MS = 5000;
         let lastError = '';
         let lastCode = '';

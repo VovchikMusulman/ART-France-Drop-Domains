@@ -55,8 +55,8 @@ const CT_LABELS: Record<string, string> = {
   lrtRefDomains: 'LRT входящих уникальных',
 };
 
-/** Полный набор метрик у CheckTrust часто считается 1–3 минуты для нового хоста */
-const POLL_ATTEMPTS = 36;
+/** Базовый набор метрик (ИКС/возраст) — ждём до ~8 мин с первого нажатия */
+const POLL_ATTEMPTS = 96;
 const POLL_DELAY_MS = 5000;
 
 export type CheckTrustResult = {
@@ -202,7 +202,7 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
       if (runId !== activeCheckRunId) return;
       patch({
         error:
-          'CheckTrust не успел посчитать метрики за ~3 минуты. Нажмите «Проверить» ещё раз — анализ уже запущен на стороне сервиса.',
+          'CheckTrust не успел посчитать метрики за отведённое время. Нажмите «Проверить» ещё раз — анализ уже запущен на стороне сервиса.',
         errorCode: lastCode || 'CT_IN_PROCESS',
         progress: '',
         loading: false,
@@ -223,8 +223,9 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
         <h2>Проверка CheckTrust</h2>
         <p className="muted">
           Если во время поиска закончились средства, здесь можно позже вручную проверить свободные
-          домены после пополнения баланса. Первый запрос по новому домену может занять 1–3 минуты —
-          приложение будет ждать ответ само.
+          домены после пополнения баланса. Запрашиваются основные метрики (ИКС, возраст Webarchive).
+          Первый запрос по новому домену может занять несколько минут — приложение ждёт ответ само
+          (до ~8 мин).
         </p>
 
         {!settings.checkTrustKey?.trim() ? (
