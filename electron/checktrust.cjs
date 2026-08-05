@@ -55,14 +55,8 @@ const PARAMETER_LIST_BASIC = [
   'trust',
   'spam',
   'sqi',
-  'hostQuality',
-  'statusCode',
-  'hasSsl',
-  'yaIndex',
-  'googleIndex',
   'webarchive',
   'webarchiveDays',
-  'ip',
 ].join(',');
 
 /** @deprecated alias — по умолчанию больше не тянем полный список */
@@ -186,8 +180,64 @@ function unwrapBody(json) {
   return json;
 }
 
+function digMetricsBlob(root, domain) {
+  let metrics = pickMetrics(root);
+  if (metrics && typeof metrics === 'object') {
+    if (domain && metrics[domain] && typeof metrics[domain] === 'object') {
+      metrics = metrics[domain];
+    } else if (metrics.host && typeof metrics.host === 'object' && !('sqi' in metrics)) {
+      metrics = metrics.host;
+    }
+  }
+  return metrics && typeof metrics === 'object' ? metrics : null;
+}
+
+/** Есть ли хоть что-то полезное (ИКС / возраст / траст), даже при «in process». */
+function extractUsableFields(metrics) {
+  if (!metrics || typeof metrics !== 'object') {
+    return { usable: false, sqi: null, webarchiveDays: null, ageYears: null, webarchiveFirst: null };
+  }
+  let sqi = toNumber(metrics.sqi ?? metrics.SQI ?? metrics.iks);
+  if (sqi != null && sqi < 0) sqi = null;
+  let webarchiveDays = toNumber(metrics.webarchiveDays ?? metrics.webarchive_days);
+  if (webarchiveDays != null && webarchiveDays < 0) webarchiveDays = null;
+  const ageYears =
+    webarchiveDays != null ? Math.max(0, Math.floor(webarchiveDays / 365.25)) : null;
+  let webarchiveFirst = metrics.webarchive ?? metrics.webarchiveFirst ?? null;
+  if (webarchiveFirst === -1 || webarchiveFirst === '-1') webarchiveFirst = null;
+  const trust = toNumber(metrics.trust);
+  const usable =
+    sqi != null ||
+    webarchiveDays != null ||
+    (trust != null && trust >= 0) ||
+    Boolean(webarchiveFirst && String(webarchiveFirst).length > 2);
+  return { usable, sqi, webarchiveDays, ageYears, webarchiveFirst, trust };
+}
+
+/** Для basic-набора достаточно ИКС + возраста — можно завершать опрос раньше. */
+function hasCoreMetrics(fieldsOrResult) {
+  if (!fieldsOrResult) return false;
+  const sqi = fieldsOrResult.sqi;
+  const age =
+    fieldsOrResult.ageYears != null ||
+    fieldsOrResult.webarchiveDays != null ||
+    Boolean(fieldsOrResult.webarchiveFirst);
+  return sqi != null && age;
+}
+
+function mergeMetricMaps(prev, next) {
+  const out = { ...(prev && typeof prev === 'object' ? prev : {}) };
+  if (!next || typeof next !== 'object') return out;
+  for (const [key, value] of Object.entries(next)) {
+    if (value == null || value === '' || value === -1 || value === '-1') continue;
+    out[key] = value;
+  }
+  return out;
+}
+
 function interpretResponse(domain, res, json) {
   const body = unwrapBody(json);
+  const stillProcessing = isInProcessPayload(body) || isInProcessPayload(json);
 
   if (isLimitsPayload(body) || isLimitsPayload(json)) {
     return {
@@ -200,7 +250,43 @@ function interpretResponse(domain, res, json) {
     };
   }
 
-  if (isInProcessPayload(body) || isInProcessPayload(json)) {
+  // Сначала пробуем вытащить метрики — CheckTrust отдаёт поля постепенно, пока «in process»
+  const metricsCandidate =
+    digMetricsBlob(body, domain) || digMetricsBlob(json, domain) || null;
+  const fields = extractUsableFields(metricsCandidate);
+
+  if (fields.usable) {
+    const payload = {
+      host: domain,
+      metrics: metricsCandidate,
+      sqi: fields.sqi,
+      webarchiveDays: fields.webarchiveDays,
+      ageYears: fields.ageYears,
+      webarchiveFirst: fields.webarchiveFirst,
+      balance: body?.hostLimitsBalance ?? json?.hostLimitsBalance,
+      partial: stillProcessing && !hasCoreMetrics(fields),
+    };
+
+    // Ещё считает, но уже есть куски — UI покажет и продолжит ждать
+    if (stillProcessing && !hasCoreMetrics(fields)) {
+      return {
+        ok: false,
+        code: 'CT_PARTIAL',
+        error: IN_PROCESS_ERROR,
+        ...payload,
+        raw: body || json,
+      };
+    }
+
+    return {
+      ok: true,
+      code: 'OK',
+      ...payload,
+      partial: false,
+    };
+  }
+
+  if (stillProcessing) {
     return {
       ok: false,
       code: 'CT_IN_PROCESS',
@@ -236,23 +322,7 @@ function interpretResponse(domain, res, json) {
     return { ok: false, code: 'API', error: errText, metrics: null, raw: body };
   }
 
-  let metrics = pickMetrics(body);
-  if (isInProcessPayload(metrics)) {
-    return { ok: false, code: 'CT_IN_PROCESS', error: IN_PROCESS_ERROR, metrics: null, raw: metrics };
-  }
-  if (metrics.success === false || isLimitsPayload(metrics)) {
-    if (isInProcessPayload(metrics)) {
-      return { ok: false, code: 'CT_IN_PROCESS', error: IN_PROCESS_ERROR, metrics: null, raw: metrics };
-    }
-    return { ok: false, code: 'CT_LIMITS', error: LIMITS_ERROR, metrics: null, raw: metrics };
-  }
-
-  if (metrics[domain] && typeof metrics[domain] === 'object') {
-    metrics = metrics[domain];
-  } else if (metrics.host && typeof metrics.host === 'object' && !('sqi' in metrics)) {
-    metrics = metrics.host;
-  }
-
+  let metrics = digMetricsBlob(body, domain) || {};
   if (metrics.success === false) {
     if (isLimitsPayload(metrics)) {
       return { ok: false, code: 'CT_LIMITS', error: LIMITS_ERROR, metrics: null, raw: metrics };
@@ -269,24 +339,28 @@ function interpretResponse(domain, res, json) {
     };
   }
 
-  // CheckTrust uses -1 as "нет данных"
-  let sqi = toNumber(metrics.sqi ?? metrics.SQI ?? metrics.iks);
-  if (sqi != null && sqi < 0) sqi = null;
-  let webarchiveDays = toNumber(metrics.webarchiveDays ?? metrics.webarchive_days);
-  if (webarchiveDays != null && webarchiveDays < 0) webarchiveDays = null;
-  const ageYears =
-    webarchiveDays != null ? Math.max(0, Math.floor(webarchiveDays / 365.25)) : null;
+  const finalFields = extractUsableFields(metrics);
+  if (!finalFields.usable) {
+    return {
+      ok: false,
+      code: 'CT_EMPTY',
+      error: 'CheckTrust не вернул ИКС/возраст по этому домену',
+      metrics: metrics || null,
+      raw: body || json,
+    };
+  }
 
   return {
     ok: true,
     code: 'OK',
     host: domain,
     metrics,
-    sqi,
-    webarchiveDays,
-    ageYears,
-    webarchiveFirst: metrics.webarchive ?? metrics.webarchiveFirst ?? null,
+    sqi: finalFields.sqi,
+    webarchiveDays: finalFields.webarchiveDays,
+    ageYears: finalFields.ageYears,
+    webarchiveFirst: finalFields.webarchiveFirst,
     balance: body?.hostLimitsBalance ?? json?.hostLimitsBalance,
+    partial: false,
   };
 }
 
@@ -348,14 +422,113 @@ async function fetchCheckTrust(host, applicationKey, options = {}) {
     options.parameterList ||
     (options.full ? PARAMETER_LIST_FULL : PARAMETER_LIST_BASIC);
 
+  // UI крутит опрос сама с maxAttempts:1 — Wayback только по явному флагу
+  // или после длинного серверного poll (maxAttempts > 1).
+  const useWaybackFallback =
+    options.waybackFallback === true ||
+    (options.waybackFallback !== false && maxAttempts > 1);
+
   try {
     let last = null;
+    let bestPartial = null;
+
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      onAttempt?.({ attempt, maxAttempts, domain });
+      onAttempt?.({ attempt, maxAttempts, domain, partial: bestPartial });
       last = await requestCheckTrustOnce(domain, applicationKey, parameterList);
-      if (last.ok || last.code !== 'CT_IN_PROCESS') return last;
+
+      if (last.code === 'CT_PARTIAL') {
+        bestPartial = {
+          ...last,
+          metrics: mergeMetricMaps(bestPartial?.metrics, last.metrics),
+          sqi: last.sqi ?? bestPartial?.sqi ?? null,
+          webarchiveDays: last.webarchiveDays ?? bestPartial?.webarchiveDays ?? null,
+          ageYears: last.ageYears ?? bestPartial?.ageYears ?? null,
+          webarchiveFirst: last.webarchiveFirst ?? bestPartial?.webarchiveFirst ?? null,
+        };
+        if (typeof options.onPartial === 'function') options.onPartial(bestPartial);
+        if (hasCoreMetrics(bestPartial)) {
+          return { ...bestPartial, ok: true, code: 'OK', partial: false, error: undefined };
+        }
+        if (attempt < maxAttempts) await sleep(delayMs);
+        continue;
+      }
+
+      if (last.ok) {
+        const merged = {
+          ...last,
+          metrics: mergeMetricMaps(bestPartial?.metrics, last.metrics),
+          sqi: last.sqi ?? bestPartial?.sqi ?? null,
+          webarchiveDays: last.webarchiveDays ?? bestPartial?.webarchiveDays ?? null,
+          ageYears: last.ageYears ?? bestPartial?.ageYears ?? null,
+          webarchiveFirst: last.webarchiveFirst ?? bestPartial?.webarchiveFirst ?? null,
+          partial: false,
+        };
+        return merged;
+      }
+
+      if (last.code !== 'CT_IN_PROCESS' && last.code !== 'CT_EMPTY') return last;
       if (attempt < maxAttempts) await sleep(delayMs);
     }
+
+    // После полного ожидания: если есть частичные метрики CT — отдаём их
+    if (bestPartial && extractUsableFields(bestPartial.metrics || bestPartial).usable) {
+      return {
+        ...bestPartial,
+        ok: true,
+        code: 'OK_PARTIAL',
+        partial: true,
+        error: undefined,
+        note:
+          bestPartial.note ||
+          'CheckTrust ещё не закрыл расчёт полностью — показаны метрики, которые уже пришли.',
+      };
+    }
+
+    // Только если CT так ничего и не отдал — возраст из Wayback (не вместо CT)
+    if (useWaybackFallback) {
+      try {
+        const { checkOldSnapshot } = require('./wayback-check.cjs');
+        const wb = await checkOldSnapshot(domain, 0);
+        if (wb?.ok && wb.oldest) {
+          const ageYears = wb.ageYears != null ? wb.ageYears : null;
+          const stamp = String(wb.oldest);
+          const webarchiveFirst =
+            stamp.length >= 8
+              ? `${stamp.slice(0, 4)}-${stamp.slice(4, 6)}-${stamp.slice(6, 8)}`
+              : stamp;
+          return {
+            ok: true,
+            code: 'OK_WAYBACK',
+            host: domain,
+            metrics: {
+              webarchive: webarchiveFirst,
+              webarchiveDays:
+                ageYears != null ? Math.round(ageYears * 365.25) : null,
+              sqi: null,
+              _source: 'wayback-fallback',
+            },
+            sqi: null,
+            webarchiveDays: ageYears != null ? Math.round(ageYears * 365.25) : null,
+            ageYears,
+            webarchiveFirst,
+            note:
+              'CheckTrust не отдал метрики за отведённое время; возраст взят из Wayback Machine. ИКС для free-домена часто недоступен.',
+          };
+        }
+        if (wb?.ok && !wb.oldest) {
+          return {
+            ok: false,
+            code: 'CT_NO_DATA',
+            error:
+              'CheckTrust не посчитал метрики за отведённое время, а в Wayback нет снимков. Нажмите «Проверить» ещё раз позже.',
+            metrics: null,
+          };
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     return (
       last || {
         ok: false,
@@ -384,7 +557,7 @@ function metricsToDetails(metrics) {
   // Any extra keys not in our map
   for (const [key, value] of Object.entries(metrics)) {
     if (PARAM_LABELS[key]) continue;
-    if (key === 'host' || key === 'success') continue;
+    if (key === 'host' || key === 'success' || key.startsWith('_')) continue;
     rows.push({ key, label: key, value });
   }
   return rows;
@@ -400,6 +573,8 @@ module.exports = {
   toNumber,
   isLimitsPayload,
   isInProcessPayload,
+  hasCoreMetrics,
+  mergeMetricMaps,
   LIMITS_ERROR,
   IN_PROCESS_ERROR,
   DEFAULT_POLL_ATTEMPTS,

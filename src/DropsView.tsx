@@ -371,17 +371,93 @@ export default function DropsView({
       }
 
       if (settings.checkTrustKey?.trim()) {
-        const POLL_ATTEMPTS = 96; // ~8 мин, basic metrics
+        const POLL_ATTEMPTS = 96; // ~8 мин — ждём CheckTrust, метрики рисуем по ходу
         const POLL_DELAY_MS = 5000;
         let lastError = '';
         let lastCode = '';
-        let gotCt = false;
+        let gotComplete = false;
+        let acc: {
+          sqi: number | null;
+          ageYears: number | null;
+          webarchiveDays: number | null;
+          webarchiveFirst: string | null;
+          metrics: Record<string, unknown> | null;
+          note?: string;
+          code?: string;
+        } = {
+          sqi: null,
+          ageYears: null,
+          webarchiveDays: null,
+          webarchiveFirst: null,
+          metrics: null,
+        };
+
+        const applyAcc = (status: string, done: boolean) => {
+          applyPartial({
+            ageYears: acc.ageYears,
+            iks: acc.sqi,
+            waybackOldest: acc.webarchiveFirst,
+            hasSnapshots2y:
+              acc.ageYears != null ? acc.ageYears >= (settings.minAgeYears || 2) : false,
+            checkTrust: {
+              sqi: acc.sqi,
+              ageYears: acc.ageYears,
+              webarchiveDays: acc.webarchiveDays,
+              webarchiveFirst: acc.webarchiveFirst,
+              metrics: acc.metrics,
+              note: acc.note,
+              code: acc.code,
+            },
+            reason: done
+              ? acc.note
+                ? 'свободен · метрики CheckTrust (частично)'
+                : 'свободен · метрики загружены'
+              : 'свободен · метрики загружаются…',
+            status,
+          });
+        };
+
+        const mergeAcc = (res: {
+          sqi?: number | null;
+          ageYears?: number | null;
+          webarchiveDays?: number | null;
+          webarchiveFirst?: string | null;
+          metrics?: Record<string, unknown> | null;
+          note?: string;
+          code?: string;
+        }) => {
+          const metrics = { ...(acc.metrics || {}) };
+          if (res.metrics && typeof res.metrics === 'object') {
+            for (const [key, value] of Object.entries(res.metrics)) {
+              if (value == null || value === '' || value === -1 || value === '-1') continue;
+              metrics[key] = value;
+            }
+          }
+          acc = {
+            sqi: res.sqi ?? acc.sqi,
+            ageYears: res.ageYears ?? acc.ageYears,
+            webarchiveDays: res.webarchiveDays ?? acc.webarchiveDays,
+            webarchiveFirst: res.webarchiveFirst
+              ? String(res.webarchiveFirst)
+              : acc.webarchiveFirst,
+            metrics: Object.keys(metrics).length ? metrics : acc.metrics,
+            note: res.note || acc.note,
+            code: res.code || acc.code,
+          };
+        };
 
         for (let attempt = 1; attempt <= POLL_ATTEMPTS; attempt += 1) {
+          const hasBits = acc.sqi != null || acc.ageYears != null;
           setSession((p) => ({
             ...p,
-            status:
-              attempt === 1
+            status: hasBits
+              ? `CheckTrust ${domain}: уже есть ${[
+                  acc.ageYears != null ? `возраст ${acc.ageYears}` : null,
+                  acc.sqi != null ? `ИКС ${acc.sqi}` : null,
+                ]
+                  .filter(Boolean)
+                  .join(', ')} · жду остальные… ${attempt}/${POLL_ATTEMPTS}`
+              : attempt === 1
                 ? `CheckTrust: запрос по ${domain}…`
                 : `CheckTrust считает метрики ${domain}… ${attempt}/${POLL_ATTEMPTS}`,
           }));
@@ -392,34 +468,44 @@ export default function DropsView({
             maxAttempts: 1,
           });
 
-          if (res?.ok) {
-            gotCt = true;
-            applyPartial({
-              ageYears: res.ageYears ?? null,
-              iks: res.sqi ?? null,
-              waybackOldest: null,
-              hasSnapshots2y:
-                res.ageYears != null ? res.ageYears >= (settings.minAgeYears || 2) : false,
-              checkTrust: {
-                sqi: res.sqi,
-                ageYears: res.ageYears,
-                webarchiveDays: res.webarchiveDays,
-                metrics: res.metrics || null,
-              },
-              reason: 'свободен · метрики загружены',
-              status: `Метрики готовы: ${domain}`,
-            });
+          if (res?.ok && !res.partial) {
+            mergeAcc(res);
+            gotComplete = true;
+            applyAcc(`Метрики готовы: ${domain}`, true);
             break;
+          }
+
+          if (res?.code === 'CT_PARTIAL' || (res?.ok && res.partial)) {
+            mergeAcc(res);
+            applyAcc(
+              `Метрики ${domain} поступают… ${attempt}/${POLL_ATTEMPTS}`,
+              false
+            );
+            if (acc.sqi != null && acc.ageYears != null) {
+              gotComplete = true;
+              applyAcc(`Метрики готовы: ${domain}`, true);
+              break;
+            }
+            if (attempt < POLL_ATTEMPTS) {
+              await new Promise((r) => setTimeout(r, POLL_DELAY_MS));
+            }
+            continue;
           }
 
           lastCode = res?.code || '';
           lastError = res?.error || 'CheckTrust не ответил';
 
-          if (res?.code !== 'CT_IN_PROCESS') {
-            applyPartial({
-              checkTrust: { error: lastError, code: lastCode || undefined },
-              status: `Метрики ${domain}: ${lastError}`,
-            });
+          if (res?.code !== 'CT_IN_PROCESS' && res?.code !== 'CT_EMPTY') {
+            if (acc.sqi != null || acc.ageYears != null || acc.metrics) {
+              acc.note = lastError;
+              applyAcc(`Метрики ${domain}: частично (${lastError})`, true);
+            } else {
+              applyPartial({
+                checkTrust: { error: lastError, code: lastCode || undefined },
+                status: `Метрики ${domain}: ${lastError}`,
+              });
+            }
+            gotComplete = true;
             break;
           }
 
@@ -428,15 +514,41 @@ export default function DropsView({
           }
         }
 
-        if (!gotCt && lastCode === 'CT_IN_PROCESS') {
-          applyPartial({
-            checkTrust: {
-              error:
-                'CheckTrust ещё считает метрики. Подождите и нажмите «Обновить метрики» ещё раз — анализ уже запущен.',
-              code: 'CT_IN_PROCESS',
-            },
-            status: `CheckTrust ещё считает ${domain} — нажмите «Обновить метрики» через минуту`,
-          });
+        if (!gotComplete) {
+          if (acc.sqi != null || acc.ageYears != null || acc.metrics) {
+            acc.note =
+              acc.note ||
+              'Показаны метрики, которые успел отдать CheckTrust. Можно обновить позже.';
+            applyAcc(`Метрики ${domain}: частичный ответ CheckTrust`, true);
+          } else if (lastCode === 'CT_IN_PROCESS' || lastCode === 'CT_EMPTY' || !lastCode) {
+            setSession((p) => ({
+              ...p,
+              status: `CheckTrust не отдал данные — возраст ${domain} из Wayback…`,
+            }));
+            const fallback = await window.artfrance.lookupCheckTrust({
+              host: domain,
+              applicationKey: settings.checkTrustKey,
+              maxAttempts: 1,
+              waybackFallback: true,
+            });
+            if (fallback?.ok) {
+              mergeAcc(fallback);
+              applyAcc(
+                `Возраст ${domain} из Wayback (CheckTrust не ответил за ~8 мин)`,
+                true
+              );
+            } else {
+              applyPartial({
+                checkTrust: {
+                  error:
+                    fallback?.error ||
+                    'CheckTrust не посчитал метрики за отведённое время. Попробуйте позже.',
+                  code: fallback?.code || lastCode || 'CT_IN_PROCESS',
+                },
+                status: `Метрики ${domain}: CheckTrust не ответил`,
+              });
+            }
+          }
         }
       }
     } finally {

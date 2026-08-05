@@ -377,6 +377,7 @@ ipcMain.handle('checktrust:lookup', async (_event, payload) => {
     // UI обычно шлёт maxAttempts:1 и крутит опрос сама; без опций — длинный poll
     ...(Number.isFinite(maxAttempts) && maxAttempts > 0 ? { maxAttempts } : {}),
     ...(Number.isFinite(delayMs) && delayMs > 0 ? { delayMs } : {}),
+    ...(payload?.waybackFallback === true ? { waybackFallback: true } : {}),
   });
 });
 
@@ -425,7 +426,11 @@ ipcMain.handle('domain:metrics', async (_event, payload) => {
       Number(payload?.maxAttempts) > 0 ? Number(payload.maxAttempts) : Math.max(DEFAULT_POLL_ATTEMPTS, 48);
     const delayMs =
       Number(payload?.delayMs) > 0 ? Number(payload.delayMs) : DEFAULT_POLL_DELAY_MS;
-    const ct = await fetchCheckTrust(host, ctKey, { maxAttempts, delayMs });
+    const ct = await fetchCheckTrust(host, ctKey, {
+      maxAttempts,
+      delayMs,
+      waybackFallback: true,
+    });
     if (ct.ok) {
       ageYears = ct.ageYears ?? null;
       iks = ct.sqi ?? null;
@@ -436,6 +441,8 @@ ipcMain.handle('domain:metrics', async (_event, payload) => {
         webarchiveDays: ct.webarchiveDays,
         webarchiveFirst: ct.webarchiveFirst,
         metrics: ct.metrics,
+        note: ct.note || undefined,
+        code: ct.code || undefined,
       };
     } else {
       checkTrust = { error: ct.error || 'CheckTrust не ответил', code: ct.code || undefined };

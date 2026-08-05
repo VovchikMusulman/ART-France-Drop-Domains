@@ -55,7 +55,7 @@ const CT_LABELS: Record<string, string> = {
   lrtRefDomains: 'LRT входящих уникальных',
 };
 
-/** Базовый набор метрик (ИКС/возраст) — ждём до ~8 мин с первого нажатия */
+/** Ждём CheckTrust до ~8 мин; метрики рисуем по мере поступления, опрос не рвём раньше времени */
 const POLL_ATTEMPTS = 96;
 const POLL_DELAY_MS = 5000;
 
@@ -64,6 +64,8 @@ export type CheckTrustResult = {
   sqi?: number | null;
   ageYears?: number | null;
   metrics?: Record<string, unknown> | null;
+  note?: string;
+  pending?: boolean;
 };
 
 export type CheckTrustSession = {
@@ -103,6 +105,38 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function mergeResult(
+  prev: CheckTrustResult | null,
+  res: {
+    host?: string;
+    sqi?: number | null;
+    ageYears?: number | null;
+    metrics?: Record<string, unknown> | null;
+    note?: string;
+  },
+  pending: boolean
+): CheckTrustResult {
+  const metrics = { ...(prev?.metrics || {}) };
+  if (res.metrics && typeof res.metrics === 'object') {
+    for (const [key, value] of Object.entries(res.metrics)) {
+      if (value == null || value === '' || value === -1 || value === '-1') continue;
+      metrics[key] = value;
+    }
+  }
+  return {
+    host: res.host || prev?.host,
+    sqi: res.sqi ?? prev?.sqi ?? null,
+    ageYears: res.ageYears ?? prev?.ageYears ?? null,
+    metrics: Object.keys(metrics).length ? metrics : null,
+    note: res.note || prev?.note,
+    pending,
+  };
+}
+
+function hasCore(result: CheckTrustResult | null) {
+  return Boolean(result && result.sqi != null && result.ageYears != null);
+}
+
 export default function CheckTrustView({ settings, session, setSession, onOpenSettings }: Props) {
   const { domain, loading, progress, error, errorCode, result } = session;
 
@@ -116,6 +150,7 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
     }
     for (const [key, value] of Object.entries(metrics)) {
       if (CT_LABELS[key]) continue;
+      if (key.startsWith('_')) continue;
       rows.push({ key, label: key, value });
     }
     return rows;
@@ -148,16 +183,23 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
     try {
       let lastCode = '';
       let lastError = '';
+      let acc: CheckTrustResult | null = null;
 
       for (let attempt = 1; attempt <= POLL_ATTEMPTS; attempt += 1) {
         if (runId !== activeCheckRunId) return;
 
-        patch({
-          progress:
-            attempt === 1
-              ? 'Запрос к CheckTrust…'
-              : `CheckTrust считает метрики… ${attempt}/${POLL_ATTEMPTS}`,
-        });
+        const waitingHint = acc
+          ? `Уже есть: ${[
+              acc.ageYears != null ? `возраст ${acc.ageYears}` : null,
+              acc.sqi != null ? `ИКС ${acc.sqi}` : null,
+            ]
+              .filter(Boolean)
+              .join(', ') || 'частичные данные'} · жду остальные… ${attempt}/${POLL_ATTEMPTS}`
+          : attempt === 1
+            ? 'Запрос к CheckTrust…'
+            : `CheckTrust считает метрики… ${attempt}/${POLL_ATTEMPTS}`;
+
+        patch({ progress: waitingHint });
 
         const res = await window.artfrance?.lookupCheckTrust({
           host,
@@ -167,24 +209,56 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
 
         if (runId !== activeCheckRunId) return;
 
-        if (res?.ok) {
+        // Полный ответ CheckTrust
+        if (res?.ok && !res.partial) {
+          acc = mergeResult(acc, res, false);
           patch({
-            result: {
-              host: res.host,
-              sqi: res.sqi,
-              ageYears: res.ageYears,
-              metrics: res.metrics || null,
-            },
+            result: acc,
             progress: '',
             loading: false,
           });
           return;
         }
 
+        // Частичные метрики — показываем сразу и продолжаем ждать CT
+        if (res?.code === 'CT_PARTIAL' || (res?.ok && res.partial)) {
+          acc = mergeResult(acc, res, true);
+          patch({
+            result: acc,
+            error: '',
+            errorCode: '',
+            progress: waitingHint,
+            loading: true,
+          });
+          if (hasCore(acc)) {
+            patch({
+              result: { ...acc, pending: false },
+              progress: '',
+              loading: false,
+            });
+            return;
+          }
+          if (attempt < POLL_ATTEMPTS) await sleep(POLL_DELAY_MS);
+          continue;
+        }
+
         lastCode = res?.code || '';
         lastError = res?.error || 'Не удалось проверить домен';
 
-        if (res?.code !== 'CT_IN_PROCESS') {
+        if (res?.code !== 'CT_IN_PROCESS' && res?.code !== 'CT_EMPTY') {
+          // Если уже показали куски — оставляем их, ошибку только если пусто
+          if (acc && (acc.sqi != null || acc.ageYears != null || acc.metrics)) {
+            patch({
+              result: {
+                ...acc,
+                pending: false,
+                note: lastError,
+              },
+              progress: '',
+              loading: false,
+            });
+            return;
+          }
           patch({
             error: lastError,
             errorCode: lastCode,
@@ -200,10 +274,48 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
       }
 
       if (runId !== activeCheckRunId) return;
+
+      // Полное ожидание закончилось: если CT уже что-то отдал — фиксируем это
+      if (acc && (acc.sqi != null || acc.ageYears != null || acc.metrics)) {
+        patch({
+          result: {
+            ...acc,
+            pending: false,
+            note:
+              acc.note ||
+              'Показаны метрики, которые успел отдать CheckTrust. Можно нажать «Проверить» ещё раз позже.',
+          },
+          progress: '',
+          loading: false,
+        });
+        return;
+      }
+
+      // CT ничего не отдал — только тогда Wayback для возраста
+      patch({ progress: 'CheckTrust не отдал данные — пробую возраст из Wayback…' });
+      const fallback = await window.artfrance?.lookupCheckTrust({
+        host,
+        applicationKey: settings.checkTrustKey,
+        maxAttempts: 1,
+        waybackFallback: true,
+      });
+
+      if (runId !== activeCheckRunId) return;
+
+      if (fallback?.ok) {
+        patch({
+          result: mergeResult(acc, fallback, false),
+          progress: '',
+          loading: false,
+        });
+        return;
+      }
+
       patch({
         error:
+          fallback?.error ||
           'CheckTrust не успел посчитать метрики за отведённое время. Нажмите «Проверить» ещё раз — анализ уже запущен на стороне сервиса.',
-        errorCode: lastCode || 'CT_IN_PROCESS',
+        errorCode: fallback?.code || lastCode || 'CT_IN_PROCESS',
         progress: '',
         loading: false,
       });
@@ -223,9 +335,10 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
         <h2>Проверка CheckTrust</h2>
         <p className="muted">
           Если во время поиска закончились средства, здесь можно позже вручную проверить свободные
-          домены после пополнения баланса. Запрашиваются основные метрики (ИКС, возраст Webarchive).
-          Первый запрос по новому домену может занять несколько минут — приложение ждёт ответ само
-          (до ~8 мин).
+          домены после пополнения баланса. Запрашиваются ИКС и возраст Webarchive. CheckTrust считает
+          метрики постепенно — приложение показывает их сразу, как только появляются, и продолжает
+          ждать остальные (до ~8 мин). Wayback используется только если CheckTrust за это время
+          ничего не отдал.
         </p>
 
         {!settings.checkTrustKey?.trim() ? (
@@ -267,7 +380,11 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
         {error ? (
           <div
             className={`status-pill ${
-              errorCode === 'CT_LIMITS' || errorCode === 'CT_IN_PROCESS' ? 'warn' : 'err'
+              errorCode === 'CT_LIMITS' ||
+              errorCode === 'CT_IN_PROCESS' ||
+              errorCode === 'CT_NO_DATA'
+                ? 'warn'
+                : 'err'
             }`}
           >
             {error}
@@ -276,16 +393,31 @@ export default function CheckTrustView({ settings, session, setSession, onOpenSe
       </section>
 
       <section className="panel">
-        <h2>{result?.host || 'Результат'}</h2>
+        <h2>
+          {result?.host || 'Результат'}
+          {result?.pending ? ' · обновляется…' : ''}
+        </h2>
         {result ? (
           <>
             <div className="detail-summary">
-              <span className="metric-na">Возраст: {result.ageYears ?? '—'}</span>
-              <span className="metric-na">ИКС: {result.sqi ?? '—'}</span>
+              <span className="metric-na">
+                Возраст: {result.ageYears ?? (result.pending ? '…' : '—')}
+              </span>
+              <span className="metric-na">
+                ИКС: {result.sqi ?? (result.pending ? '…' : '—')}
+              </span>
             </div>
+            {result.pending ? (
+              <div className="status-pill warn">Метрики приходят с CheckTrust — жду остальные…</div>
+            ) : null}
+            {result.note && !result.pending ? (
+              <div className="status-pill warn">{result.note}</div>
+            ) : null}
             <div className="detail-list">
               {detailRows.length === 0 ? (
-                <div className="muted">Метрики не пришли.</div>
+                <div className="muted">
+                  {result.pending ? 'Жду первые поля от CheckTrust…' : 'Метрики не пришли.'}
+                </div>
               ) : (
                 detailRows.map((row) => (
                   <div key={row.key} className="detail-row">

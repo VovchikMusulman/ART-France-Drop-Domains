@@ -27,6 +27,7 @@ export type CheckTrustPayload = {
   metrics?: Record<string, unknown> | null;
   error?: string;
   code?: string;
+  note?: string;
 };
 
 export type DomainRow = {
@@ -104,7 +105,11 @@ export type CheckTrustLookupResult = {
   sqi?: number | null;
   ageYears?: number | null;
   webarchiveDays?: number | null;
+  webarchiveFirst?: string | null;
   metrics?: Record<string, unknown> | null;
+  note?: string;
+  /** true = CheckTrust ещё считает, но часть полей уже есть */
+  partial?: boolean;
 };
 
 export type JobResult = {
@@ -150,6 +155,8 @@ export type ArtFranceApi = {
     applicationKey: string;
     maxAttempts?: number;
     delayMs?: number;
+    /** После исчерпания опроса CheckTrust — взять возраст из Wayback */
+    waybackFallback?: boolean;
   }) => Promise<CheckTrustLookupResult>;
   fetchDomainMetrics: (payload: {
     host: string;
