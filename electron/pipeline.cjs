@@ -41,13 +41,18 @@ function assertNotAborted() {
 
 /** User-facing reasons only — no technical jargon */
 function classifyAvailability({ dnsLive, availability, registered }) {
-  if (dnsLive === true || availability === 'registered' || registered === true) {
+  // WHOIS "available" wins even if residual DNS exists (typical for drops / parking)
+  if (availability === 'available' || registered === false) {
+    return { bucket: 'good', reason: 'свободен' };
+  }
+  if (availability === 'registered' || registered === true) {
     return { bucket: 'bad', reason: 'домен занят' };
   }
-  if (availability !== 'available') {
-    return { bucket: 'bad', reason: 'не удалось проверить свободу' };
+  // WHOIS unknown → DNS as weak fallback
+  if (dnsLive === true) {
+    return { bucket: 'bad', reason: 'домен занят' };
   }
-  return { bucket: 'good', reason: 'свободен' };
+  return { bucket: 'bad', reason: 'не удалось проверить свободу' };
 }
 
 function softenSemrushLog(payload) {
@@ -88,12 +93,39 @@ function softenSemrushLog(payload) {
   return null;
 }
 
-/** Fast free-check: DNS first, WHOIS only if DNS is quiet. No RDAP. */
+/**
+ * Free-check: WHOIS is the source of truth (no RDAP).
+ * DNS alone must NOT mark a domain occupied — expired drops often keep parking DNS.
+ */
 async function inspectAvailability(domain) {
   const dnsProbe = await probeDns(domain);
   const dnsLive = dnsProbe.live === true || dnsProbe.delegated === true;
+  const whois = await checkWhoisAvailability(domain);
 
-  // Live/delegated DNS ⇒ occupied — skip WHOIS
+  let availability = whois.availability;
+  let registered = null;
+  if (availability === 'registered') registered = true;
+  else if (availability === 'available') registered = false;
+
+  if (availability === 'available') {
+    return {
+      dnsLive,
+      availability: 'available',
+      registered: false,
+      created: whois.created || null,
+    };
+  }
+
+  if (availability === 'registered') {
+    return {
+      dnsLive,
+      availability: 'registered',
+      registered: true,
+      created: whois.created || null,
+    };
+  }
+
+  // WHOIS unknown/timeout: only then trust DNS as "занят"
   if (dnsLive) {
     return {
       dnsLive: true,
@@ -103,21 +135,11 @@ async function inspectAvailability(domain) {
     };
   }
 
-  const whois = await checkWhoisAvailability(domain);
-  let availability = whois.availability;
-  let registered = null;
-
-  if (availability === 'registered') {
-    registered = true;
-  } else if (availability === 'available') {
-    registered = false;
-  }
-
   return {
     dnsLive: false,
-    availability,
-    registered,
-    created: whois.created || null,
+    availability: 'unknown',
+    registered: null,
+    created: null,
   };
 }
 
@@ -373,6 +395,12 @@ async function runPipeline(options, hooks = {}) {
       'success',
       `Готово: свободных ${good.length}, занятых ${bad.length}. Метрики загружайте кнопкой по выбранному домену.`
     );
+    if (!good.length && bad.length) {
+      emit(
+        'info',
+        'Свободных не нашлось среди исходящих ссылок конкурентов — так бывает часто. Попробуйте другой запрос.'
+      );
+    }
   }
 
   return {
