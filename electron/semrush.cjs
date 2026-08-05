@@ -286,6 +286,12 @@ function isOutgoingApiUrl(url) {
 
 async function detectEmptyOutboundReason(page) {
   const body = ((await page.locator('body').innerText().catch(() => '')) || '').slice(0, 8000);
+  if (/something went wrong|problem with the server|try to reload|ошибка сервера|попробуйте обновить/i.test(body)) {
+    return {
+      code: 'SEMRUSH_SERVER',
+      note: 'Semrush показал ошибку сервера (Something went wrong) — нужен повтор',
+    };
+  }
   if (/you.?ve used \d+ free requests|used \d+ free requests|upgrade to (starter|pro|guru)/i.test(body)) {
     return {
       code: 'SEMRUSH_LIMIT',
@@ -302,6 +308,12 @@ async function detectEmptyOutboundReason(page) {
     };
   }
   return null;
+}
+
+function payloadHasOutboundRows(payload) {
+  if (!payload) return false;
+  const { rows } = extractRows(payload);
+  return Array.isArray(rows) && rows.length > 0;
 }
 
 /** Fallback: scrape domains from the rendered table if API JSON was missed */
@@ -460,77 +472,155 @@ async function openLiveSession({ email, password, userDataPath, onLog, forceLogi
       const target = extractDomainFromUrl(targetRaw);
       if (!target) throw new Error('Пустой target');
 
-      let apiPayload = null;
-      let apiStatus = 0;
-      let apiUrlHit = '';
+      const reportUrl = `https://www.semrush.com/analytics/backlinks/outbound-domains/?q=${encodeURIComponent(target)}&searchType=domain`;
+      const maxAttempts = 3;
 
-      const onResponse = async (res) => {
-        try {
-          if (!isOutgoingApiUrl(res.url())) return;
-          apiStatus = res.status();
-          apiUrlHit = res.url();
-          const text = await res.text();
-          if (text.trim().startsWith('{') || text.trim().startsWith('[')) {
-            apiPayload = JSON.parse(text);
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        let apiPayload = null;
+        let apiStatus = 0;
+        let apiUrlHit = '';
+
+        const onResponse = async (res) => {
+          try {
+            if (!isOutgoingApiUrl(res.url())) return;
+            const status = res.status();
+            const text = await res.text();
+            if (!(text.trim().startsWith('{') || text.trim().startsWith('['))) return;
+            const json = JSON.parse(text);
+            // First JSON may be empty after "Something went wrong"; prefer a payload with rows.
+            if (payloadHasOutboundRows(json) || !apiPayload) {
+              apiPayload = json;
+              apiStatus = status;
+              apiUrlHit = res.url();
+            }
+          } catch {
+            // ignore parse errors
           }
-        } catch {
-          // ignore parse errors
-        }
-      };
+        };
 
-      page.on('response', onResponse);
-      try {
-        const reportUrl = `https://www.semrush.com/analytics/backlinks/outbound-domains/?q=${encodeURIComponent(target)}&searchType=domain`;
-        await page.goto(reportUrl, { waitUntil: 'domcontentloaded', timeout: 90000 });
-        const gate = await handleSemrushGates(page, onLog);
-        if (gate) {
-          const err = new Error(gateErrorMessage(gate));
-          err.code = gate;
+        page.on('response', onResponse);
+        try {
+          if (attempt === 1) {
+            await page.goto(reportUrl, { waitUntil: 'domcontentloaded', timeout: 90000 });
+          } else {
+            onLog?.({
+              level: 'warn',
+              message: `${target}: повтор ${attempt}/${maxAttempts} (Semrush пустой ответ или сбой сервера)…`,
+            });
+            await page.reload({ waitUntil: 'domcontentloaded', timeout: 90000 }).catch(async () => {
+              await page.goto(reportUrl, { waitUntil: 'domcontentloaded', timeout: 90000 });
+            });
+          }
+
+          const gate = await handleSemrushGates(page, onLog);
+          if (gate) {
+            const err = new Error(gateErrorMessage(gate));
+            err.code = gate;
+            throw err;
+          }
+
+          // Wait until we get rows, or timeout (~40s). Don't stop on first empty JSON.
+          for (let i = 0; i < 80; i += 1) {
+            if (/\/login/i.test(page.url())) {
+              throw new Error('SEMRUSH_LOGIN_REQUIRED');
+            }
+            if (payloadHasOutboundRows(apiPayload)) break;
+            const pageReasonEarly = i > 0 && i % 10 === 0 ? await detectEmptyOutboundReason(page) : null;
+            if (pageReasonEarly?.code === 'SEMRUSH_SERVER' && i >= 20) break;
+            await page.waitForTimeout(500);
+          }
+        } finally {
+          page.off('response', onResponse);
+        }
+
+        const pageReason = await detectEmptyOutboundReason(page);
+
+        if (
+          apiStatus === 403 ||
+          (apiPayload &&
+            (String(extractRows(apiPayload).meta.status || '').toLowerCase() === 'forbidden' ||
+              extractRows(apiPayload).meta.is_limited === true))
+        ) {
+          const gate = await handleSemrushGates(page, onLog);
+          if (gate) {
+            const err = new Error(gateErrorMessage(gate));
+            err.code = gate;
+            throw err;
+          }
+          const err = new Error(
+            'Semrush ограничил Outbound Domains (Forbidden / is_limited). Проверьте подписку и лимит запросов.'
+          );
+          err.code = 'SEMRUSH_FORBIDDEN';
           throw err;
         }
 
-        // Wait for API response up to ~35s
-        for (let i = 0; i < 70 && !apiPayload; i += 1) {
-          if (/\/login/i.test(page.url())) {
-            throw new Error('SEMRUSH_LOGIN_REQUIRED');
-          }
-          await page.waitForTimeout(500);
-        }
-
-        // One soft reload if UI fired nothing (SPA race)
-        if (!apiPayload) {
-          await page.reload({ waitUntil: 'domcontentloaded', timeout: 90000 }).catch(() => null);
-          await handleSemrushGates(page, onLog);
-          for (let i = 0; i < 40 && !apiPayload; i += 1) {
-            await page.waitForTimeout(500);
-          }
-        }
-      } finally {
-        page.off('response', onResponse);
-      }
-
-      if (!apiPayload) {
-        const pageReason = await detectEmptyOutboundReason(page);
         if (pageReason?.code === 'SEMRUSH_LIMIT') {
           const err = new Error(pageReason.note);
           err.code = 'SEMRUSH_FREE_LIMIT';
           throw err;
         }
 
-        const scraped = await scrapeOutboundTable(page);
-        const filteredScraped = scraped.filter((d) => d && !isNoiseDomain(d, target));
-        if (filteredScraped.length) {
-          const entries = filteredScraped.map((domain) => ({ domain, as: null, dr: null }));
+        let filtered = [];
+        let entries = [];
+        let mapped = [];
+        let parsed = { rows: [], total: 0, meta: {} };
+        let source = 'none';
+        let note = null;
+
+        if (apiPayload) {
+          parsed = extractRows(apiPayload);
+          mapped = mapRows(parsed.rows).filter((r) => r.domain && !isNoiseDomain(r.domain, target));
+          const byDomain = new Map();
+          for (const row of mapped) {
+            const prev = byDomain.get(row.domain);
+            if (!prev || (row.domainAscore || 0) > (prev.as || 0)) {
+              byDomain.set(row.domain, {
+                domain: row.domain,
+                as: Number.isFinite(row.domainAscore) ? row.domainAscore : null,
+                dr: null,
+              });
+            }
+          }
+          entries = [...byDomain.values()];
+          filtered = entries.map((e) => e.domain);
+          if (filtered.length) {
+            source = 'api';
+          }
+        }
+
+        if (!filtered.length) {
+          const scraped = await scrapeOutboundTable(page);
+          const filteredScraped = scraped.filter((d) => d && !isNoiseDomain(d, target));
+          if (filteredScraped.length) {
+            filtered = filteredScraped;
+            entries = filteredScraped.map((domain) => ({ domain, as: null, dr: null }));
+            mapped = entries;
+            source = 'dom';
+            note = apiPayload
+              ? 'JSON пустой, домены взяты из таблицы UI'
+              : 'данные из таблицы UI (JSON API не поймали)';
+          }
+        }
+
+        if (filtered.length) {
           return {
             target,
-            total: filteredScraped.length,
-            domains: filteredScraped,
+            total: parsed.total || filtered.length,
+            domains: filtered,
             entries,
-            rawCount: filteredScraped.length,
+            rawCount: mapped.length || filtered.length,
             httpStatus: apiStatus || 0,
-            note: 'данные из таблицы UI (JSON API не поймали)',
-            source: 'dom',
+            meta: parsed.meta,
+            source,
+            note,
+            attempt,
           };
+        }
+
+        // Empty after server glitch — retry like manual reload in browser
+        if (attempt < maxAttempts && (pageReason?.code === 'SEMRUSH_SERVER' || !filtered.length)) {
+          await sleep(1200);
+          continue;
         }
 
         return {
@@ -542,75 +632,24 @@ async function openLiveSession({ email, password, userDataPath, onLog, forceLogi
           httpStatus: apiStatus || 0,
           note:
             pageReason?.note ||
-            'не получен ответ Outbound API (лимит Free / подписка / блок отчёта / смена API)',
-          source: 'none',
+            (apiPayload
+              ? 'API ответил, но список доменов пуст'
+              : 'не получен ответ Outbound API (лимит Free / подписка / блок отчёта / смена API)'),
+          source: apiPayload ? 'api' : 'none',
           apiUrlHit: apiUrlHit || null,
+          attempt,
         };
-      }
-
-      const parsed = extractRows(apiPayload);
-      if (
-        apiStatus === 403 ||
-        String(parsed.meta.status || '').toLowerCase() === 'forbidden' ||
-        parsed.meta.is_limited === true
-      ) {
-        const gate = await handleSemrushGates(page, onLog);
-        if (gate) {
-          const err = new Error(gateErrorMessage(gate));
-          err.code = gate;
-          throw err;
-        }
-        const err = new Error(
-          'Semrush ограничил Outbound Domains (Forbidden / is_limited). Проверьте подписку и лимит запросов.'
-        );
-        err.code = 'SEMRUSH_FORBIDDEN';
-        throw err;
-      }
-
-      const mapped = mapRows(parsed.rows).filter((r) => r.domain && !isNoiseDomain(r.domain, target));
-      const byDomain = new Map();
-      for (const row of mapped) {
-        const prev = byDomain.get(row.domain);
-        if (!prev || (row.domainAscore || 0) > (prev.as || 0)) {
-          byDomain.set(row.domain, {
-            domain: row.domain,
-            as: Number.isFinite(row.domainAscore) ? row.domainAscore : null,
-            dr: null,
-          });
-        }
-      }
-      const entries = [...byDomain.values()];
-      const filtered = entries.map((e) => e.domain);
-
-      if (!filtered.length) {
-        const scraped = await scrapeOutboundTable(page);
-        const filteredScraped = scraped.filter((d) => d && !isNoiseDomain(d, target));
-        if (filteredScraped.length) {
-          const scrapedEntries = filteredScraped.map((domain) => ({ domain, as: null, dr: null }));
-          return {
-            target,
-            total: filteredScraped.length,
-            domains: filteredScraped,
-            entries: scrapedEntries,
-            rawCount: filteredScraped.length,
-            httpStatus: apiStatus,
-            note: 'JSON пустой, домены взяты из таблицы UI',
-            source: 'dom',
-            meta: parsed.meta,
-          };
-        }
       }
 
       return {
         target,
-        total: parsed.total,
-        domains: filtered,
-        entries,
-        rawCount: mapped.length,
-        httpStatus: apiStatus,
-        meta: parsed.meta,
-        source: 'api',
-        note: filtered.length ? null : 'API ответил, но список доменов пуст',
+        total: 0,
+        domains: [],
+        entries: [],
+        rawCount: 0,
+        httpStatus: 0,
+        note: 'не удалось получить Outbound Domains после повторов',
+        source: 'none',
       };
     };
 
