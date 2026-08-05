@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type Dispatch, type MouseEvent, type SetStateAction } from 'react';
+import { useEffect, useMemo, useRef, type Dispatch, type MouseEvent, type SetStateAction } from 'react';
 import type { AppSettings, DomainRow, JobLog, JobProgress } from './vite-env';
 import type { DropsSession } from './App';
 
@@ -78,18 +78,33 @@ export default function DropsView({
   onOpenSettings,
   onOpenCheckTrust,
 }: Props) {
-  const [running, setRunning] = useState(false);
-  const [tab, setTab] = useState<'good' | 'bad' | 'sources'>('good');
-  const [selected, setSelected] = useState<DomainRow | null>(null);
   const logRef = useRef<HTMLDivElement | null>(null);
   const stickBottom = useRef(true);
 
-  const { query, good, bad, sources, logs, progress, status, logHeight } = session;
+  const {
+    query,
+    good,
+    bad,
+    sources,
+    logs,
+    progress,
+    status,
+    logHeight,
+    selectedDomain,
+    resultsTab: tab,
+    metricsLoadingDomain,
+    jobRunning: running,
+  } = session;
   const isGoogle = settings.searchProvider !== 'yandex';
   const minAge = settings.minAgeYears || 2;
   const minIks = settings.minIks ?? 100;
   const minDr = settings.minDr ?? 20;
   const minAs = settings.minAs ?? 20;
+
+  const selected = useMemo(() => {
+    if (!selectedDomain) return null;
+    return good.find((r) => r.domain === selectedDomain) || null;
+  }, [good, selectedDomain]);
 
   const goodEmptyText = running
     ? 'Ищем дропы'
@@ -100,6 +115,14 @@ export default function DropsView({
   function openUrl(raw: string) {
     const href = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
     void window.artfrance?.openExternal(href);
+  }
+
+  function setTab(next: 'good' | 'bad' | 'sources') {
+    setSession((p) => ({ ...p, resultsTab: next }));
+  }
+
+  function selectDomain(row: DomainRow | null) {
+    setSession((p) => ({ ...p, selectedDomain: row?.domain || null }));
   }
 
   useEffect(() => {
@@ -187,9 +210,6 @@ export default function DropsView({
     if (!settings.hasSemrushSession && (!settings.semrushEmail.trim() || !settings.semrushPassword)) {
       return setSession((p) => ({ ...p, status: 'Подключите Semrush в Настройках' }));
     }
-    if (!settings.checkTrustKey?.trim()) {
-      return setSession((p) => ({ ...p, status: 'Нет CheckTrust API key — откройте Настройки' }));
-    }
 
     const provider = settings.searchProvider === 'yandex' ? 'yandex' : 'serper';
     if (provider === 'serper' && !settings.serperKey.trim()) {
@@ -204,11 +224,12 @@ export default function DropsView({
       }
     }
 
-    setRunning(true);
-    setSelected(null);
     stickBottom.current = true;
     setSession((p) => ({
       ...p,
+      jobRunning: true,
+      selectedDomain: null,
+      resultsTab: 'good',
       logs: [],
       good: [],
       bad: [],
@@ -242,14 +263,12 @@ export default function DropsView({
       maxOutlinksPerSource: settings.maxOutlinksPerSource,
     });
 
-    setRunning(false);
-    setTab('good');
     const failed = Boolean(result && !result.ok && !result.aborted);
     const finishedMsg = result?.aborted
       ? 'Остановлено'
       : failed
         ? 'Поиск завершён с ошибкой — детали в логе'
-        : `Готово: good ${result.good?.length || 0}, bad ${result.bad?.length || 0}`;
+        : `Готово: good ${result.good?.length || 0}, bad ${result.bad?.length || 0}. Метрики — по кнопке у домена.`;
 
     setSession((p) => {
       const nextLogs = [...(p.logs || [])];
@@ -262,6 +281,8 @@ export default function DropsView({
       }
       return {
         ...p,
+        jobRunning: false,
+        resultsTab: 'good',
         good: result.good || [],
         bad: result.bad || [],
         sources: result.organic || p.sources || [],
@@ -275,6 +296,60 @@ export default function DropsView({
           sourceTotal: 0,
           message: finishedMsg,
         },
+      };
+    });
+  }
+
+  async function handleFetchMetrics(domain: string) {
+    if (!window.artfrance || !domain) return;
+    if (!settings.checkTrustKey?.trim() && !settings.ahrefsApiKey?.trim()) {
+      setSession((p) => ({
+        ...p,
+        status: 'Нет ключей CheckTrust / Ahrefs — откройте Настройки',
+      }));
+      return;
+    }
+    if (metricsLoadingDomain) return;
+
+    setSession((p) => ({
+      ...p,
+      metricsLoadingDomain: domain,
+      selectedDomain: domain,
+      status: `Загружаю метрики для ${domain}…`,
+    }));
+
+    const res = await window.artfrance.fetchDomainMetrics({
+      host: domain,
+      checkTrustKey: settings.checkTrustKey,
+      ahrefsApiKey: settings.ahrefsApiKey,
+    });
+
+    setSession((p) => {
+      const goodNext = p.good.map((row) => {
+        if (row.domain !== domain) return row;
+        return {
+          ...row,
+          ageYears: res.ageYears ?? row.ageYears,
+          iks: res.iks ?? row.iks,
+          dr: res.dr ?? row.dr,
+          waybackOldest: res.waybackOldest ?? row.waybackOldest,
+          hasSnapshots2y: res.hasSnapshots2y ?? row.hasSnapshots2y,
+          checkTrust: res.checkTrust !== undefined ? res.checkTrust : row.checkTrust,
+          reason: res.checkTrust?.metrics
+            ? 'свободен · метрики загружены'
+            : res.error
+              ? `свободен · ${res.error}`
+              : row.reason,
+        };
+      });
+      return {
+        ...p,
+        good: goodNext,
+        metricsLoadingDomain: null,
+        selectedDomain: p.selectedDomain || domain,
+        status: res.ok
+          ? `Метрики: ${domain}`
+          : `Метрики ${domain}: ${res.error || 'не загрузились'}`,
       };
     });
   }
@@ -299,10 +374,10 @@ export default function DropsView({
           <div className="status-pill err">Semrush: нет сессии</div>
         ) : null}
         {!settings.checkTrustKey?.trim() ? (
-          <div className="status-pill err">CheckTrust: нет ключа</div>
+          <div className="status-pill">CheckTrust: нет ключа (метрики вручную)</div>
         ) : null}
         {isGoogle && !settings.ahrefsApiKey?.trim() ? (
-          <div className="status-pill err">Ahrefs DR: нет ключа</div>
+          <div className="status-pill">Ahrefs DR: нет ключа (метрики вручную)</div>
         ) : null}
         {settings.searchProvider === 'yandex' && !settings.yandexApiKey?.trim() ? (
           <div className="status-pill err">Yandex: нет API key</div>
@@ -510,9 +585,14 @@ export default function DropsView({
                     <tr
                       key={`${r.domain}-${r.sourceDomain}-${r.checkedAt}`}
                       className={`row-clickable ${selected?.domain === r.domain ? 'row-selected' : ''}`}
-                      onClick={() => setSelected(r)}
+                      onClick={() => selectDomain(r)}
                     >
-                      <td>{r.domain}</td>
+                      <td>
+                        {r.domain}
+                        {metricsLoadingDomain === r.domain ? (
+                          <span className="muted"> · метрики…</span>
+                        ) : null}
+                      </td>
                       {isGoogle ? (
                         <>
                           <td className={drClass(r.dr)}>{r.dr ?? '—'}</td>
@@ -599,7 +679,7 @@ export default function DropsView({
         <aside className="panel detail-panel">
           <div className="log-head">
             <h2>{selected.domain}</h2>
-            <button type="button" className="btn-ghost" onClick={() => setSelected(null)}>
+            <button type="button" className="btn-ghost" onClick={() => selectDomain(null)}>
               Закрыть
             </button>
           </div>
@@ -611,6 +691,20 @@ export default function DropsView({
               : selected.checkTrust?.error
                 ? ` · ${selected.checkTrust.error}`
                 : ''}
+          </div>
+          <div className="actions" style={{ marginBottom: 10 }}>
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={Boolean(metricsLoadingDomain) || running}
+              onClick={() => void handleFetchMetrics(selected.domain)}
+            >
+              {metricsLoadingDomain === selected.domain
+                ? 'Загружаю метрики…'
+                : selected.checkTrust?.metrics || selected.dr != null
+                  ? 'Обновить метрики'
+                  : 'Загрузить метрики'}
+            </button>
           </div>
           <div className="detail-summary">
             {isGoogle ? (
@@ -643,7 +737,10 @@ export default function DropsView({
               ) : selected.checkTrust?.error ? (
                 <div className="muted">{selected.checkTrust.error}</div>
               ) : (
-                <div className="muted">Нет данных CheckTrust по этому домену.</div>
+                <div className="muted">
+                  Метрики ещё не загружены. Нажмите «Загрузить метрики», чтобы запросить CheckTrust
+                  {isGoogle ? ' и Ahrefs DR' : ' (ИКС / возраст)'} только для этого домена.
+                </div>
               )
             ) : (
               detailRows.map((row) => (

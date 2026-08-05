@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('artfrance', {
   windowMaximize: () => ipcRenderer.invoke('window:maximize'),
   windowClose: () => ipcRenderer.invoke('window:close'),
   lookupCheckTrust: (payload) => ipcRenderer.invoke('checktrust:lookup', payload),
+  fetchDomainMetrics: (payload) => ipcRenderer.invoke('domain:metrics', payload),
   startCapture: (options) => ipcRenderer.invoke('capture:start', options),
   stopCapture: () => ipcRenderer.invoke('capture:stop'),
   onProgress: (handler) => {

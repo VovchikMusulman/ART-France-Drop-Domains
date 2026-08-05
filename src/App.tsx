@@ -17,6 +17,11 @@ export type DropsSession = {
   progress: JobProgress | null;
   status: string;
   logHeight: number;
+  /** Persist selection across tab switches */
+  selectedDomain: string | null;
+  resultsTab: 'good' | 'bad' | 'sources';
+  metricsLoadingDomain: string | null;
+  jobRunning: boolean;
 };
 
 const emptyDrops = (): DropsSession => ({
@@ -28,6 +33,10 @@ const emptyDrops = (): DropsSession => ({
   progress: null,
   status: '',
   logHeight: 180,
+  selectedDomain: null,
+  resultsTab: 'good',
+  metricsLoadingDomain: null,
+  jobRunning: false,
 });
 
 export default function App() {
@@ -183,7 +192,7 @@ export default function App() {
       </header>
 
       <div className="titlebar-no-drag app-body">
-        {mode === 'drops' ? (
+        <div className={`view-slot ${mode === 'drops' ? 'view-slot-active' : ''}`}>
           <DropsView
             settings={settings}
             scheduleSave={scheduleSave}
@@ -201,18 +210,21 @@ export default function App() {
               switchMode('checktrust');
             }}
           />
-        ) : mode === 'shots' ? (
+        </div>
+        {mode === 'shots' ? (
           <ScreenshotsView settings={settings} scheduleSave={scheduleSave} onOpenSettings={() => switchMode('settings')} />
-        ) : mode === 'checktrust' ? (
+        ) : null}
+        {mode === 'checktrust' ? (
           <CheckTrustView
             settings={settings}
             session={checkTrust}
             setSession={setCheckTrust}
             onOpenSettings={() => switchMode('settings')}
           />
-        ) : (
+        ) : null}
+        {mode === 'settings' ? (
           <SettingsView settings={settings} setSettings={setSettings} scheduleSave={scheduleSave} />
-        )}
+        ) : null}
       </div>
     </div>
   );

@@ -151,6 +151,23 @@ export type ArtFranceApi = {
     maxAttempts?: number;
     delayMs?: number;
   }) => Promise<CheckTrustLookupResult>;
+  fetchDomainMetrics: (payload: {
+    host: string;
+    checkTrustKey?: string;
+    ahrefsApiKey?: string;
+    maxAttempts?: number;
+    delayMs?: number;
+  }) => Promise<{
+    ok: boolean;
+    host: string;
+    ageYears?: number | null;
+    iks?: number | null;
+    dr?: number | null;
+    waybackOldest?: string | null;
+    hasSnapshots2y?: boolean;
+    checkTrust?: CheckTrustPayload | null;
+    error?: string;
+  }>;
   exportCsv: (payload: { kind: 'good' | 'bad'; rows: DomainRow[] }) => Promise<{
     ok: boolean;
     path?: string;

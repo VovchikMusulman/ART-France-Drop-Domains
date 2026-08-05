@@ -94,6 +94,23 @@ select {
   padding: 12px 18px 0;
 }
 
+.view-slot {
+  display: none;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+.view-slot-active {
+  display: flex;
+}
+
+.view-slot > .layout {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
 .app-body > .layout,
 .app-body > .shots-layout,
 .app-body > .settings-layout,

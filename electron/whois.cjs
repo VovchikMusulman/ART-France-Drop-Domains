@@ -67,7 +67,7 @@ function whoisTarget(domain) {
   return null;
 }
 
-function queryWhois(host, query, { timeoutMs = 12000 } = {}) {
+function queryWhois(host, query, { timeoutMs = 4000 } = {}) {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection({ port: 43, host }, () => {
       socket.write(`${query}\r\n`);
@@ -94,14 +94,16 @@ function queryWhois(host, query, { timeoutMs = 12000 } = {}) {
   });
 }
 
-async function queryWhoisWithRetry(host, query, attempts = 3) {
+async function queryWhoisWithRetry(host, query, attempts = 2) {
   let lastErr;
   for (let i = 0; i < attempts; i += 1) {
     try {
-      return await queryWhois(host, query, { timeoutMs: 10000 + i * 2000 });
+      return await queryWhois(host, query, { timeoutMs: 3500 + i * 1500 });
     } catch (err) {
       lastErr = err;
-      await new Promise((r) => setTimeout(r, 400 * (i + 1)));
+      if (i < attempts - 1) {
+        await new Promise((r) => setTimeout(r, 200 * (i + 1)));
+      }
     }
   }
   throw lastErr;

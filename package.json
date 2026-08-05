@@ -1,6 +1,6 @@
 {
   "name": "artfrance-drop-domains",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "ART France — поиск drop-доменов через Semrush Outbound Domains",
   "main": "electron/main.cjs",
   "author": "ART France",

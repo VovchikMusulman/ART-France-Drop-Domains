@@ -1,13 +1,31 @@
 const { searchTopSources } = require('./search.cjs');
 const { openLiveSession } = require('./semrush.cjs');
-const { lookupDomain } = require('./rdap.cjs');
+const { probeDns } = require('./rdap.cjs');
 const { checkWhoisAvailability } = require('./whois.cjs');
-const { fetchCheckTrust } = require('./checktrust.cjs');
-const { fetchDomainRating } = require('./ahrefs.cjs');
 const { extractDomainFromUrl, sleep } = require('./utils.cjs');
 const { DEFAULT_YANDEX_REGION_ID } = require('./yandex-regions.cjs');
 
 let abortRequested = false;
+
+/** Parallel map with fixed concurrency. */
+async function mapPool(items, concurrency, worker) {
+  const list = Array.isArray(items) ? items : [];
+  const n = Math.max(1, Math.min(concurrency, list.length || 1));
+  const results = new Array(list.length);
+  let next = 0;
+
+  async function run() {
+    while (true) {
+      const idx = next;
+      next += 1;
+      if (idx >= list.length) return;
+      results[idx] = await worker(list[idx], idx);
+    }
+  }
+
+  await Promise.all(Array.from({ length: n }, () => run()));
+  return results;
+}
 
 function abortPipeline() {
   abortRequested = true;
@@ -21,7 +39,7 @@ function assertNotAborted() {
   }
 }
 
-/** User-facing reasons only — no technical DNS/RDAP jargon */
+/** User-facing reasons only — no technical jargon */
 function classifyAvailability({ dnsLive, availability, registered }) {
   if (dnsLive === true || availability === 'registered' || registered === true) {
     return { bucket: 'bad', reason: 'домен занят' };
@@ -70,30 +88,36 @@ function softenSemrushLog(payload) {
   return null;
 }
 
+/** Fast free-check: DNS first, WHOIS only if DNS is quiet. No RDAP. */
 async function inspectAvailability(domain) {
-  const dnsAndRdap = await lookupDomain(domain);
-  await sleep(120);
-  const whois = await checkWhoisAvailability(domain);
+  const dnsProbe = await probeDns(domain);
+  const dnsLive = dnsProbe.live === true || dnsProbe.delegated === true;
 
+  // Live/delegated DNS ⇒ occupied — skip WHOIS
+  if (dnsLive) {
+    return {
+      dnsLive: true,
+      availability: 'registered',
+      registered: true,
+      created: null,
+    };
+  }
+
+  const whois = await checkWhoisAvailability(domain);
   let availability = whois.availability;
   let registered = null;
 
   if (availability === 'registered') {
     registered = true;
-  } else if (dnsAndRdap.registered === true) {
-    registered = true;
-    availability = 'registered';
   } else if (availability === 'available') {
     registered = false;
-  } else {
-    registered = dnsAndRdap.registered === true ? true : null;
   }
 
   return {
-    dnsLive: dnsAndRdap.dnsLive === true,
+    dnsLive: false,
     availability,
     registered,
-    created: whois.created || dnsAndRdap.created || null,
+    created: whois.created || null,
   };
 }
 
@@ -109,12 +133,6 @@ async function runPipeline(options, hooks = {}) {
     semrushEmail,
     semrushPassword,
     userDataPath,
-    checkTrustKey = '',
-    ahrefsApiKey = '',
-    minAgeYears = 2,
-    minIks = 100,
-    minDr: _minDr = 20,
-    minAs: _minAs = 20,
     maxOutlinksPerSource = 40,
     delayMs = 1200,
   } = options;
@@ -125,16 +143,8 @@ async function runPipeline(options, hooks = {}) {
   const good = [];
   const bad = [];
   const seen = new Set();
-  let ctLimitsHit = false;
 
   const provider = String(searchProvider || 'serper').toLowerCase() === 'yandex' ? 'yandex' : 'serper';
-
-  if (!String(checkTrustKey || '').trim()) {
-    emit('warn', 'Нет ключа CheckTrust — показатели ИКС и возраста не загрузятся');
-  }
-  if (provider === 'serper' && !String(ahrefsApiKey || '').trim()) {
-    emit('warn', 'Нет ключа Ahrefs — Domain Rating (DR) не загрузится');
-  }
 
   if (provider === 'yandex') {
     emit('info', `Ищу топ-5 сайтов в Яндексе по запросу «${query}»…`);
@@ -311,111 +321,32 @@ async function runPipeline(options, hooks = {}) {
             checkedAt: new Date().toISOString(),
           });
           emit('warn', `${domain} — ${reason}`);
-          await sleep(Math.max(350, Math.floor(delayMs / 3)));
+          await sleep(Math.max(80, Math.floor(delayMs / 8)));
           continue;
         }
 
-        let ct = null;
-        let ageYears = null;
-        let iks = null;
-        let ahrefsDr = null;
-        let ctReason = 'свободен';
-
-        if (String(checkTrustKey || '').trim() && !ctLimitsHit) {
-          emit('info', `${domain} — свободен, загружаю ИКС и возраст…`);
-          ct = await fetchCheckTrust(domain, checkTrustKey, {
-            maxAttempts: 24,
-            delayMs: 5000,
-          });
-          if (ct.ok) {
-            ageYears = ct.ageYears;
-            iks = ct.sqi;
-            ctReason = 'свободен';
-          } else if (ct.code === 'CT_LIMITS') {
-            ctLimitsHit = true;
-            ctReason = 'свободен';
-            emit(
-              'warn',
-              'На CheckTrust не хватает средств. ИКС и возраст не загрузятся — проверьте домены позже во вкладке CheckTrust.'
-            );
-          } else if (ct.code === 'CT_IN_PROCESS') {
-            ctReason = 'свободен';
-            emit(
-              'warn',
-              `${domain} — CheckTrust ещё обрабатывает домен, метрики появятся позже (вкладка CheckTrust)`
-            );
-          } else {
-            ctReason = 'свободен (метрики не загрузились)';
-            emit('warn', `${domain} — свободен, но показатели CheckTrust не загрузились`);
-          }
-          await sleep(250);
-        }
-
-        if (String(ahrefsApiKey || '').trim()) {
-          emit('info', `${domain} — загружаю DR (Ahrefs)…`);
-          const ah = await fetchDomainRating(domain, ahrefsApiKey);
-          if (ah.ok) {
-            ahrefsDr = ah.dr;
-          } else if (ah.code === 'AHREFS_AUTH') {
-            emit('warn', 'Ahrefs: неверный API key или нужна авторизация для Domain Rating');
-          } else if (ah.code === 'AHREFS_RATE') {
-            emit('warn', 'Ahrefs: слишком много запросов DR, подождите и повторите');
-          } else {
-            emit('warn', `${domain} — DR не загрузился`);
-          }
-          await sleep(200);
-        }
-
-        if (ct?.ok) {
-          emit(
-            'success',
-            `${domain} — свободен · ИКС ${iks ?? '—'} · возраст ${ageYears ?? '—'} · DR ${ahrefsDr ?? '—'} · AS ${semrushAs ?? '—'}`
-          );
-        } else if (ctLimitsHit) {
-          emit('success', `${domain} — свободен · DR ${ahrefsDr ?? '—'} · AS ${semrushAs ?? '—'} (CheckTrust: нет средств)`);
-        } else if (!String(checkTrustKey || '').trim()) {
-          emit('success', `${domain} — свободен · DR ${ahrefsDr ?? '—'} · AS ${semrushAs ?? '—'}`);
-        } else {
-          emit('success', `${domain} — свободен · DR ${ahrefsDr ?? '—'} · AS ${semrushAs ?? '—'}`);
-        }
-
+        emit('success', `${domain} — свободен${semrushAs != null ? ` · AS ${semrushAs}` : ''}`);
         good.push({
           domain,
           sourceDomain: source.domain,
           sourceUrl: source.link,
           registered: false,
           created: avail.created,
-          ageYears,
-          iks,
-          dr: ahrefsDr,
+          ageYears: null,
+          iks: null,
+          dr: null,
           as: semrushAs,
-          hasSnapshots2y: ageYears != null ? ageYears >= minAgeYears : false,
-          waybackOldest: ct?.webarchiveFirst ? String(ct.webarchiveFirst) : null,
-          reason: ctReason,
-          checkTrust: ct?.ok
-            ? {
-                sqi: ct.sqi,
-                ageYears: ct.ageYears,
-                webarchiveDays: ct.webarchiveDays,
-                webarchiveFirst: ct.webarchiveFirst,
-                metrics: ct.metrics,
-              }
-            : ct
-              ? { error: ct.error, code: ct.code || undefined }
-              : ctLimitsHit
-                ? {
-                    error:
-                      'На CheckTrust не хватает средств. Пополните баланс и проверьте домен во вкладке CheckTrust.',
-                    code: 'CT_LIMITS',
-                  }
-                : null,
+          hasSnapshots2y: false,
+          waybackOldest: null,
+          reason: 'свободен',
+          checkTrust: null,
           checkedAt: new Date().toISOString(),
         });
 
-        await sleep(Math.max(400, Math.floor(delayMs / 3)));
+        await sleep(Math.max(80, Math.floor(delayMs / 8)));
       }
 
-      await sleep(delayMs);
+      await sleep(Math.max(200, Math.floor(delayMs / 2)));
     }
   } finally {
     await session.close();
@@ -438,7 +369,10 @@ async function runPipeline(options, hooks = {}) {
       `Готово: свободных доменов нет (проверено занятых: ${bad.length}). Это нормально — попробуйте другой запрос.`
     );
   } else {
-    emit('success', `Готово: свободных ${good.length}, занятых ${bad.length}`);
+    emit(
+      'success',
+      `Готово: свободных ${good.length}, занятых ${bad.length}. Метрики загружайте кнопкой по выбранному домену.`
+    );
   }
 
   return {
