@@ -85,6 +85,8 @@ export type AppSettings = {
   minDr: number;
   /** Подсветка для Google (Serper): мин. Authority Score (Semrush) */
   minAs: number;
+  /** Сколько сайтов брать из выдачи по ключу (топ-N) */
+  topSourcesCount: number;
   maxOutlinksPerSource: number;
   hasSemrushSession?: boolean;
   semrushLastLoginAt?: number;

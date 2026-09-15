@@ -156,6 +156,7 @@ async function runPipeline(options, hooks = {}) {
     semrushPassword,
     userDataPath,
     maxOutlinksPerSource = 40,
+    topSourcesCount = 5,
     delayMs = 1200,
   } = options;
 
@@ -167,17 +168,18 @@ async function runPipeline(options, hooks = {}) {
   const seen = new Set();
 
   const provider = String(searchProvider || 'serper').toLowerCase() === 'yandex' ? 'yandex' : 'serper';
+  const topN = Math.min(20, Math.max(1, Number(topSourcesCount) || 5));
 
   if (provider === 'yandex') {
-    emit('info', `Ищу топ-5 сайтов в Яндексе по запросу «${query}»…`);
+    emit('info', `Ищу топ-${topN} сайтов в Яндексе по запросу «${query}»…`);
   } else {
-    emit('info', `Ищу топ-5 сайтов в Google по запросу «${query}»…`);
+    emit('info', `Ищу топ-${topN} сайтов в Google по запросу «${query}»…`);
   }
 
   const search = await searchTopSources({
     searchProvider: provider,
     query,
-    num: 5,
+    num: topN,
     serperKey,
     yandexApiKey,
     yandexFolderId,

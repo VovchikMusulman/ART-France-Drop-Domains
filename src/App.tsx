@@ -57,6 +57,7 @@ export default function App() {
     minIks: 100,
     minDr: 20,
     minAs: 20,
+    topSourcesCount: 5,
     maxOutlinksPerSource: 40,
     hasSemrushSession: false,
     domains: '',

@@ -87,6 +87,7 @@ export default function SettingsView({ settings, setSettings, scheduleSave }: Pr
       minIks: settings.minIks,
       minDr: settings.minDr,
       minAs: settings.minAs,
+      topSourcesCount: settings.topSourcesCount,
       maxOutlinksPerSource: settings.maxOutlinksPerSource,
     });
     const result = await window.artfrance.loginSemrush();
@@ -123,7 +124,7 @@ export default function SettingsView({ settings, setSettings, scheduleSave }: Pr
         <section className="panel">
           <h2>API поиска конкурентов</h2>
           <p className="muted">
-            Ключи для топ‑5 источников: Serper (Google) или Yandex Search API — в зависимости от
+            Ключи для топ‑N источников: Serper (Google) или Yandex Search API — в зависимости от
             выбора в параметрах поиска.
           </p>
 
@@ -274,7 +275,7 @@ export default function SettingsView({ settings, setSettings, scheduleSave }: Pr
               onClick={() => setProvider('serper')}
             >
               <strong>Serper</strong>
-              <span>Google top‑5</span>
+              <span>Google выдача</span>
             </button>
             <button
               type="button"
@@ -387,6 +388,18 @@ export default function SettingsView({ settings, setSettings, scheduleSave }: Pr
         )}
         <div className="row">
           <div className="field">
+            <label>Топ источников из выдачи</label>
+            <input
+              type="number"
+              min={1}
+              max={20}
+              value={settings.topSourcesCount ?? 5}
+              onChange={(e) =>
+                scheduleSave({ topSourcesCount: clampNumber(e.target.value, 1, 20, 5) })
+              }
+            />
+          </div>
+          <div className="field">
             <label>Макс. outlinks / источник</label>
             <input
               type="number"
@@ -400,9 +413,11 @@ export default function SettingsView({ settings, setSettings, scheduleSave }: Pr
           </div>
         </div>
         <div className="muted">
+          Топ источников — сколько сайтов брать из поиска по ключу (1–20). Outlinks — сколько
+          исходящих доменов тянуть с каждого через Semrush.
           {provider === 'yandex'
-            ? 'Режим Яндекс: в Good подсвечиваются Возраст и ИКС (CheckTrust). Все свободные домены попадают в Good.'
-            : 'Режим Google: в Good подсвечиваются DR (Ahrefs) и AS (Semrush Outbound).'}
+            ? ' Режим Яндекс: в Good подсвечиваются Возраст и ИКС (CheckTrust).'
+            : ' Режим Google: в Good подсвечиваются DR (Ahrefs) и AS (Semrush).'}
         </div>
       </section>
 

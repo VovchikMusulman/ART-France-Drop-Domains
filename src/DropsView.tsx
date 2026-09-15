@@ -260,6 +260,7 @@ export default function DropsView({
       minIks: settings.minIks,
       minDr: settings.minDr,
       minAs: settings.minAs,
+      topSourcesCount: settings.topSourcesCount,
       maxOutlinksPerSource: settings.maxOutlinksPerSource,
     });
 

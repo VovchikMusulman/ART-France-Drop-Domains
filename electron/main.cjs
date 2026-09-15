@@ -37,6 +37,7 @@ function readSettings() {
     minIks: 100,
     minDr: 20,
     minAs: 20,
+    topSourcesCount: 5,
     maxOutlinksPerSource: 40,
     domains: '',
     frequency: 'monthly',
@@ -219,6 +220,7 @@ ipcMain.handle('job:start', async (_event, options) => {
     minIks: options?.minIks ?? current.minIks,
     minDr: options?.minDr ?? current.minDr,
     minAs: options?.minAs ?? current.minAs,
+    topSourcesCount: options?.topSourcesCount ?? current.topSourcesCount,
     maxOutlinksPerSource: options?.maxOutlinksPerSource ?? current.maxOutlinksPerSource,
   });
 
@@ -240,6 +242,7 @@ ipcMain.handle('job:start', async (_event, options) => {
         minIks: Number(settings.minIks) || 100,
         minDr: Number(settings.minDr) || 20,
         minAs: Number(settings.minAs) || 20,
+        topSourcesCount: Number(settings.topSourcesCount) || 5,
         maxOutlinksPerSource: Number(settings.maxOutlinksPerSource) || 40,
       },
       {
